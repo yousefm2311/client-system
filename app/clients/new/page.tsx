@@ -1630,14 +1630,15 @@ export default function NewClientPage() {
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
 
   const today = () => new Date().toISOString().slice(0, 10);
-  const makeEmptyRow = () => ({
-    key: makeId(),
-    docType: "",
-    customName: "",
-    docDate: today(),
-    status: "idle",
-    error: "",
-  });
+const makeEmptyRow = (): DocRowState => ({
+  key: makeId(),
+  docType: "",
+  customName: "",
+  docDate: today(),
+  status: "idle",
+  error: "",
+});
+
 
   useEffect(() => {
     setDocs([makeEmptyRow()]);
