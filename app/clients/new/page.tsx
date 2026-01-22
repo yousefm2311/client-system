@@ -486,7 +486,7 @@
 //               >
 //                 إضافة مستند جديد
 //               </button>
-              
+
 //             <button
 //               type="button"
 //               onClick={handleSave}
@@ -504,7 +504,6 @@
 //     </main>
 //   );
 // }
-
 
 // // "use client";
 
@@ -974,11 +973,6 @@
 // //   );
 // // }
 
-
-
-
-
-
 // "use client";
 
 // import { useEffect, useMemo, useState } from "react";
@@ -1381,7 +1375,7 @@
 //                   <span className="text-xs text-rose-600">لا تملك صلاحية التعديل لهذا العميل.</span>
 //                 ) : null}
 //               </div>
-          
+
 //             </div>
 
 //             <div className="space-y-3">
@@ -1529,12 +1523,6 @@
 //   );
 // }
 
-
-
-
-
-
-
 "use client";
 
 import {
@@ -1546,9 +1534,14 @@ import {
   renameFileWithClientCode,
 } from "@/lib/documents";
 import { normalizeBranch as normalizeBranchPerm } from "@/lib/permissions";
-import { canAccessAllBranches, canCreateClient } from "@/lib/permissions-special";
+import {
+  canAccessAllBranches,
+  canCreateClient,
+} from "@/lib/permissions-special";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
+
+type DocRowStatus = "idle" | "uploading" | "saving" | "success" | "error";
 
 type DocRowState = {
   key: string;
@@ -1559,6 +1552,8 @@ type DocRowState = {
   file?: File;
   fileLabel?: string;
   existingPath?: string;
+  status?: DocRowStatus;
+  error?: string;
 };
 
 type ExistingDoc = {
@@ -1570,6 +1565,21 @@ type ExistingDoc = {
 
 type BranchOption = { code: string; name: string };
 
+type SaveProgress = {
+  total: number;
+  done: number;
+  success: number;
+  failed: number;
+};
+
+type PreparedRow = {
+  row: DocRowState;
+  docName: string;
+  docDateValue: string;
+};
+
+const MAX_PARALLEL_UPLOADS = 3;
+
 const makeId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
@@ -1578,6 +1588,27 @@ const makeId = () =>
 const matchDocType = (name: string) => {
   const normalized = normalizeDocName(name);
   return DOC_TYPES.find((t) => normalizeDocName(t) === normalized);
+};
+
+const runWithConcurrency = async <T,>(
+  tasks: Array<() => Promise<T>>,
+  limit: number,
+) => {
+  if (tasks.length === 0) return [];
+  const results: T[] = new Array(tasks.length);
+  const concurrency = Math.max(1, Math.min(limit, tasks.length));
+  let index = 0;
+
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (index < tasks.length) {
+      const current = index;
+      index += 1;
+      results[current] = await tasks[current]();
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
 };
 
 export default function NewClientPage() {
@@ -1596,11 +1627,20 @@ export default function NewClientPage() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [docs, setDocs] = useState<DocRowState[]>([]);
+  const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
 
   const today = () => new Date().toISOString().slice(0, 10);
+  const makeEmptyRow = () => ({
+    key: makeId(),
+    docType: "",
+    customName: "",
+    docDate: today(),
+    status: "idle",
+    error: "",
+  });
 
   useEffect(() => {
-    setDocs([{ key: makeId(), docType: "", customName: "", docDate: today() }]);
+    setDocs([makeEmptyRow()]);
   }, []);
 
   useEffect(() => {
@@ -1608,13 +1648,17 @@ export default function NewClientPage() {
     setClientName("");
     setClientNameHint("");
     setIsExisting(false);
+    setSaveProgress(null);
   }, [clientCode]);
 
   // صلاحيات الصفحة + تحميل الفروع للإدمن
   useEffect(() => {
     const checkAccess = async () => {
       try {
-        const res = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
+        const res = await fetch("/api/auth/me", {
+          credentials: "include",
+          cache: "no-store",
+        });
         if (!res.ok) {
           setAllowed(false);
           return;
@@ -1630,7 +1674,10 @@ export default function NewClientPage() {
 
         if (adminFlag) {
           try {
-            const bRes = await fetch("/api/branches", { credentials: "include", cache: "no-store" });
+            const bRes = await fetch("/api/branches", {
+              credentials: "include",
+              cache: "no-store",
+            });
             const bData = await bRes.json().catch(() => ({}));
             if (bRes.ok && Array.isArray(bData.branches)) {
               setBranches(bData.branches);
@@ -1652,21 +1699,23 @@ export default function NewClientPage() {
   }, [router]);
 
   const addRow = () => {
-    setDocs((prev) => [...prev, { key: makeId(), docType: "", customName: "", docDate: today() }]);
+    setDocs((prev) => [...prev, makeEmptyRow()]);
   };
 
   const removeRowLocal = (key: string, allowEmpty = false) => {
     setDocs((prev) => {
       const next = prev.filter((d) => d.key !== key);
       if (next.length === 0 && !allowEmpty) {
-        return [{ key: makeId(), docType: "", customName: "", docDate: today() }];
+        return [makeEmptyRow()];
       }
       return next;
     });
   };
 
   const updateRow = (key: string, patch: Partial<DocRowState>) => {
-    setDocs((prev) => prev.map((row) => (row.key === key ? { ...row, ...patch } : row)));
+    setDocs((prev) =>
+      prev.map((row) => (row.key === key ? { ...row, ...patch } : row)),
+    );
   };
 
   const handleClientNameHint = () => {
@@ -1682,11 +1731,16 @@ export default function NewClientPage() {
     setClientNameHint("");
     setCanEdit(true);
     setClientLoaded(false);
+    setSaveProgress(null);
     try {
-      const res = await fetch(`/api/clients?code=${encodeURIComponent(clientCode.trim())}`, {
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("تعذر الاتصال بقاعدة البيانات، حاول مرة أخرى.");
+      const res = await fetch(
+        `/api/clients?code=${encodeURIComponent(clientCode.trim())}`,
+        {
+          credentials: "include",
+        },
+      );
+      if (!res.ok)
+        throw new Error("تعذر الاتصال بقاعدة البيانات، حاول مرة أخرى.");
       const data = await res.json().catch(() => ({}));
       setClientLoaded(true);
 
@@ -1695,7 +1749,9 @@ export default function NewClientPage() {
         setIsExisting(!unauthorized);
         setClientName(data.client.clientName || "");
         if (unauthorized) {
-          setMessage(data.denyReason || "هذا العميل في فرع آخر ولا تملك صلاحية التعديل.");
+          setMessage(
+            data.denyReason || "هذا العميل في فرع آخر ولا تملك صلاحية التعديل.",
+          );
           setCanEdit(false);
           setDocs([]);
           return;
@@ -1709,11 +1765,14 @@ export default function NewClientPage() {
       const docsRes = await fetch(`/api/clients/${clientCode.trim()}`, {
         credentials: "include",
       });
-      if (!docsRes.ok) throw new Error("تعذر جلب مستندات العميل، حاول مرة أخرى.");
+      if (!docsRes.ok)
+        throw new Error("تعذر جلب مستندات العميل، حاول مرة أخرى.");
       const docsData = await docsRes.json().catch(() => ({}));
 
       if (docsData.unauthorized) {
-        setMessage(docsData.denyReason || "هذا العميل في فرع آخر ولا تملك صلاحية العرض.");
+        setMessage(
+          docsData.denyReason || "هذا العميل في فرع آخر ولا تملك صلاحية العرض.",
+        );
         setCanEdit(false);
         setDocs([]);
         return;
@@ -1731,22 +1790,26 @@ export default function NewClientPage() {
               docId: d.DocId,
               docType: isOther ? OTHER_DOC_TYPE : matchedType!,
               customName: isOther ? fixedName : "",
-              docDate: d.DocDate ? new Date(d.DocDate).toISOString().slice(0, 10) : "",
+              docDate: d.DocDate
+                ? new Date(d.DocDate).toISOString().slice(0, 10)
+                : "",
               file: undefined,
               fileLabel: undefined,
               existingPath: d.FilePath,
+              status: "idle",
+              error: "",
             };
-          })
+          }),
         );
         setMessage("تم تحميل مستندات العميل.");
       } else {
-        setDocs([{ key: makeId(), docType: "", customName: "", docDate: today() }]);
+        setDocs([makeEmptyRow()]);
       }
     } catch (err) {
       setMessage(
         err instanceof Error
           ? err.message
-          : "تعذر الاتصال بالخادم أو قاعدة البيانات، حاول لاحقاً."
+          : "تعذر الاتصال بالخادم أو قاعدة البيانات، حاول لاحقاً.",
       );
     } finally {
       setLoading(false);
@@ -1754,12 +1817,15 @@ export default function NewClientPage() {
   };
 
   const handleDeleteRow = async (row: DocRowState) => {
+    if (loading) return;
     if (!canEdit) return;
     if (!row.docId) {
       removeRowLocal(row.key);
       return;
     }
-    const confirmDelete = window.confirm("سيتم حذف المستند نهائياً، هل تريد المتابعة؟");
+    const confirmDelete = window.confirm(
+      "سيتم حذف المستند نهائياً، هل تريد المتابعة؟",
+    );
     if (!confirmDelete) return;
     try {
       const res = await fetch("/api/documents/delete", {
@@ -1773,16 +1839,22 @@ export default function NewClientPage() {
       removeRowLocal(row.key, true);
       setMessage("تم حذف المستند بنجاح.");
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "تعذر حذف المستند، حاول لاحقاً.");
+      setMessage(
+        err instanceof Error ? err.message : "تعذر حذف المستند، حاول لاحقاً.",
+      );
     }
   };
 
-  const handleSave = async () => {
-    if (!clientCode.trim()) {
+  const performSave = async (rowsOverride?: DocRowState[]) => {
+    const trimmedClientCode = clientCode.trim();
+    const trimmedClientName = clientName.trim();
+    setSaveProgress(null);
+
+    if (!trimmedClientCode) {
       setMessage("يرجى إدخال كود العميل.");
       return;
     }
-    if (!clientName.trim() && !isExisting) {
+    if (!trimmedClientName && !isExisting) {
       setMessage("يرجى إدخال اسم العميل.");
       return;
     }
@@ -1790,13 +1862,64 @@ export default function NewClientPage() {
       setMessage("ليس لديك صلاحية التعديل على هذا العميل.");
       return;
     }
-    const rowsToSave = docs.filter((row) => row.docType && (row.file || row.docId));
-    if (rowsToSave.length === 0) {
+
+    const sourceRows = rowsOverride ?? docs;
+    const rowsToProcess = sourceRows.filter(
+      (row) => row.docType || row.file || row.customName || row.existingPath,
+    );
+    if (rowsToProcess.length === 0) {
       setMessage("أضف مستنداً واحداً على الأقل.");
       return;
     }
+
+    const preparedRows = rowsToProcess.map((row) => {
+      const baseName =
+        row.docType === OTHER_DOC_TYPE
+          ? row.customName || row.docType
+          : row.docType;
+      const docName = baseName.trim();
+      const docDateValue = row.docDate || today();
+      let error = "";
+
+      if (!row.docType) {
+        error = "اختر نوع المستند.";
+      } else if (!docName) {
+        error = "يرجى إدخال اسم المستند.";
+      } else if (!row.file && !row.existingPath) {
+        error = "أرفق ملفاً للمستند.";
+      }
+
+      return { row, docName, docDateValue, error };
+    });
+
+    const invalidRows = preparedRows.filter((item) => item.error);
+    if (invalidRows.length > 0) {
+      invalidRows.forEach((item) =>
+        updateRow(item.row.key, { error: item.error, status: "error" }),
+      );
+    }
+
+    const rowsToSave: PreparedRow[] = preparedRows
+      .filter((item) => !item.error)
+      .map(({ row, docName, docDateValue }) => ({
+        row,
+        docName,
+        docDateValue,
+      }));
+
+    if (rowsToSave.length === 0) {
+      setMessage("يرجى تصحيح الأخطاء أولاً.");
+      return;
+    }
+
     setLoading(true);
     setMessage("");
+    setSaveProgress({
+      total: rowsToSave.length,
+      done: 0,
+      success: 0,
+      failed: 0,
+    });
     try {
       if (!isExisting) {
         const createRes = await fetch("/api/clients", {
@@ -1804,66 +1927,162 @@ export default function NewClientPage() {
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({
-            clientCode,
-            clientName,
+            clientCode: trimmedClientCode,
+            clientName: trimmedClientName,
             branch: isAdmin ? selectedBranch || userBranch : undefined,
           }),
         });
         const createData = await createRes.json().catch(() => ({}));
-        if (!createRes.ok) throw new Error(createData.message || "تعذر إنشاء العميل.");
+        if (!createRes.ok)
+          throw new Error(createData.message || "تعذر إنشاء العميل.");
         setIsExisting(true);
       }
-      for (const row of rowsToSave) {
-        const baseName = row.docType === OTHER_DOC_TYPE ? row.customName || row.docType : row.docType;
-        const docName = baseName.trim();
-        const docDateValue = row.docDate || today();
-        if (!docName) throw new Error("يرجى إدخال اسم المستند.");
-        let fileUrl: string | undefined;
-        if (row.file) {
-          const formData = new FormData();
-          const renamedFile = renameFileWithClientCode(row.file, docName, clientCode.trim());
-          formData.append("file", renamedFile);
-          formData.append("docName", docName);
-          formData.append("docDate", docDateValue);
-          const uploadRes = await fetch(
-            `/api/archives/upload?clientCode=${encodeURIComponent(clientCode.trim())}`,
-            { method: "POST", body: formData }
-          );
-          const uploadData = await uploadRes.json().catch(() => ({}));
-          if (!uploadRes.ok)
-            throw new Error(uploadData.message || "تعذر رفع الملف أو الاتصال بالخدمة.");
-          fileUrl = extractFileUrl(uploadData);
-          if (!fileUrl) throw new Error("لم يتم إرجاع رابط الملف من خدمة الأرشفة.");
-        } else if (row.existingPath) {
-          fileUrl = row.existingPath;
-        } else {
-          throw new Error("أرفق ملفاً للمستند.");
-        }
-        const saveRes = await fetch(`/api/clients/${clientCode.trim()}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            docId: row.docId,
-            clientName,
-            docName,
-            docDate: docDateValue,
-            fileUrl,
-            replaceExisting: true,
-          }),
+
+      rowsToSave.forEach(({ row }) =>
+        updateRow(row.key, { error: "", status: "idle" }),
+      );
+
+      const updateProgress = (ok: boolean) => {
+        setSaveProgress((prev) => {
+          if (!prev) return prev;
+          return {
+            total: prev.total,
+            done: prev.done + 1,
+            success: prev.success + (ok ? 1 : 0),
+            failed: prev.failed + (ok ? 0 : 1),
+          };
         });
-        const saveData = await saveRes.json().catch(() => ({}));
-        if (!saveRes.ok) throw new Error(saveData.message || "تعذر حفظ المستند.");
+      };
+
+      const processRow = async ({
+        row,
+        docName,
+        docDateValue,
+      }: PreparedRow) => {
+        try {
+          let fileUrl: string | undefined = row.existingPath;
+
+          if (row.file) {
+            updateRow(row.key, { status: "uploading", error: "" });
+            const formData = new FormData();
+            const renamedFile = renameFileWithClientCode(
+              row.file,
+              docName,
+              trimmedClientCode,
+            );
+            formData.append("file", renamedFile);
+            formData.append("docName", docName);
+            formData.append("docDate", docDateValue);
+            const uploadRes = await fetch(
+              `/api/archives/upload?clientCode=${encodeURIComponent(trimmedClientCode)}`,
+              { method: "POST", body: formData },
+            );
+            const uploadData = await uploadRes.json().catch(() => ({}));
+            if (!uploadRes.ok)
+              throw new Error(
+                uploadData.message || "تعذر رفع الملف أو الاتصال بالخدمة.",
+              );
+            fileUrl = extractFileUrl(uploadData);
+            if (!fileUrl)
+              throw new Error("لم يتم إرجاع رابط الملف من خدمة الأرشفة.");
+          }
+
+          if (!fileUrl) {
+            throw new Error("أرفق ملفاً للمستند.");
+          }
+
+          updateRow(row.key, { status: "saving", error: "" });
+          const saveRes = await fetch(`/api/clients/${trimmedClientCode}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              docId: row.docId,
+              clientName: trimmedClientName || clientName,
+              docName,
+              docDate: docDateValue,
+              fileUrl,
+              replaceExisting: true,
+            }),
+          });
+          const saveData = await saveRes.json().catch(() => ({}));
+          if (!saveRes.ok)
+            throw new Error(saveData.message || "تعذر حفظ المستند.");
+
+          const updatedDoc = saveData.document ?? {};
+          const savedName = correctDocName(updatedDoc.DocName ?? docName);
+          const matchedType = matchDocType(savedName);
+          const docDateResult = updatedDoc.DocDate
+            ? new Date(updatedDoc.DocDate).toISOString().slice(0, 10)
+            : docDateValue;
+
+          updateRow(row.key, {
+            docId: updatedDoc.DocId ?? row.docId,
+            existingPath: updatedDoc.FilePath ?? fileUrl,
+            docType: matchedType ? matchedType : OTHER_DOC_TYPE,
+            customName: matchedType ? "" : savedName,
+            docDate: docDateResult,
+            file: undefined,
+            fileLabel: undefined,
+            status: "success",
+            error: "",
+          });
+
+          return { ok: true };
+        } catch (err) {
+          const errorMessage =
+            err instanceof Error ? err.message : "تعذر حفظ المستند.";
+          updateRow(row.key, { status: "error", error: errorMessage });
+          return { ok: false };
+        }
+      };
+
+      const tasks = rowsToSave.map((row) => async () => {
+        const result = await processRow(row);
+        updateProgress(result.ok);
+        return result;
+      });
+
+      const results = await runWithConcurrency(tasks, MAX_PARALLEL_UPLOADS);
+      const successCount = results.filter((r) => r.ok).length;
+      const failedCount = results.length - successCount;
+
+      if (failedCount === 0 && invalidRows.length === 0) {
+        setMessage("تم حفظ المستندات بنجاح.");
+        await loadClient();
+      } else {
+        const parts = [];
+        if (successCount) parts.push(`تم حفظ ${successCount} مستند`);
+        if (failedCount) parts.push(`فشل حفظ ${failedCount} مستند`);
+        if (invalidRows.length)
+          parts.push(`يوجد ${invalidRows.length} مستندات غير مكتملة`);
+        setMessage(`${parts.join("، ")}.`);
       }
-      setMessage("تم حفظ المستندات بنجاح.");
-      await loadClient();
     } catch (err) {
+      setSaveProgress(null);
       setMessage(
-        err instanceof Error ? err.message : "تعذر الاتصال بالخادم أو قاعدة البيانات، حاول لاحقاً."
+        err instanceof Error
+          ? err.message
+          : "تعذر الاتصال بالخادم أو قاعدة البيانات، حاول لاحقاً.",
       );
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSave = () => {
+    if (loading) return;
+    void performSave();
+  };
+
+  const handleRetryFailed = () => {
+    if (loading) return;
+    const failedRows = docs.filter((row) => row.status === "error");
+    if (failedRows.length === 0) {
+      setMessage("لا توجد مستندات فاشلة لإعادة المحاولة.");
+      return;
+    }
+    void performSave(failedRows);
   };
 
   const docTypeOptions = useMemo(
@@ -1873,13 +2092,22 @@ export default function NewClientPage() {
           {t}
         </option>
       )),
-    []
+    [],
   );
+
+  const failedRowsCount = docs.filter((row) => row.status === "error").length;
+
+  const progressPercent =
+    saveProgress && saveProgress.total > 0
+      ? Math.round((saveProgress.done / saveProgress.total) * 100)
+      : 0;
 
   if (allowed === false) {
     return (
       <main className="min-h-screen flex items-center justify-center">
-        <p className="text-lg font-semibold text-rose-600">ليس لديك صلاحية الوصول.</p>
+        <p className="text-lg font-semibold text-rose-600">
+          ليس لديك صلاحية الوصول.
+        </p>
       </main>
     );
   }
@@ -1906,6 +2134,7 @@ export default function NewClientPage() {
                 type="text"
                 value={clientCode}
                 onChange={(e) => setClientCode(e.target.value)}
+                disabled={loading}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
@@ -1949,6 +2178,7 @@ export default function NewClientPage() {
                 <select
                   value={selectedBranch}
                   onChange={(e) => setSelectedBranch(e.target.value)}
+                  disabled={loading}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 >
                   <option value="">-- اختر الفرع --</option>
@@ -1966,7 +2196,8 @@ export default function NewClientPage() {
             <button
               type="button"
               onClick={loadClient}
-              className="rounded-lg load-data border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-[var(--header-btn-hover)]"
+              disabled={loading}
+              className="rounded-lg load-data border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-[var(--header-btn-hover)] disabled:opacity-60"
             >
               تحميل بيانات العميل
             </button>
@@ -1989,10 +2220,18 @@ export default function NewClientPage() {
             <div className="space-y-3">
               {docs.map((row) => {
                 const showOther = row.docType === OTHER_DOC_TYPE;
+                const rowBusy =
+                  loading ||
+                  row.status === "uploading" ||
+                  row.status === "saving";
                 return (
                   <div
                     key={row.key}
-                    className="rounded-lg border border-slate-200 bg-slate-50 p-4"
+                    className={`rounded-lg border p-4 ${
+                      row.status === "error"
+                        ? "border-rose-900 bg-slate-900 dark:border-rose-900 dark:bg-rose-950/40"
+                        : "border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-900"
+                    }`}
                   >
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
                       <div className="md:col-span-3 space-y-1">
@@ -2002,9 +2241,13 @@ export default function NewClientPage() {
                         <select
                           value={row.docType}
                           onChange={(e) =>
-                            updateRow(row.key, { docType: e.target.value })
+                            updateRow(row.key, {
+                              docType: e.target.value,
+                              error: "",
+                              status: "idle",
+                            })
                           }
-                          disabled={!canEdit}
+                          disabled={!canEdit || rowBusy}
                           className="w-full rounded-lg border border-slate-300 px-3 h-9 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
                         >
                           <option value="">-- اختر نوع المستند --</option>
@@ -2021,9 +2264,13 @@ export default function NewClientPage() {
                             type="text"
                             value={row.customName}
                             onChange={(e) =>
-                              updateRow(row.key, { customName: e.target.value })
+                              updateRow(row.key, {
+                                customName: e.target.value,
+                                error: "",
+                                status: "idle",
+                              })
                             }
-                            disabled={!canEdit}
+                            disabled={!canEdit || rowBusy}
                             className="w-full rounded-lg border border-slate-300 px-3 h-9 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
                             placeholder="اكتب اسم المستند"
                           />
@@ -2038,9 +2285,13 @@ export default function NewClientPage() {
                           type="date"
                           value={row.docDate}
                           onChange={(e) =>
-                            updateRow(row.key, { docDate: e.target.value })
+                            updateRow(row.key, {
+                              docDate: e.target.value,
+                              error: "",
+                              status: "idle",
+                            })
                           }
-                          disabled={!canEdit}
+                          disabled={!canEdit || rowBusy}
                           className="w-full rounded-lg border border-slate-300 px-3 h-9 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
                         />
                       </div>
@@ -2064,12 +2315,14 @@ export default function NewClientPage() {
                         <input
                           id={`file-${row.key}`}
                           type="file"
-                          disabled={!canEdit}
+                          disabled={!canEdit || rowBusy}
                           onChange={(e) => {
                             const file = e.target.files?.[0];
                             updateRow(row.key, {
                               file,
                               fileLabel: file ? file.name : undefined,
+                              error: "",
+                              status: "idle",
                             });
                           }}
                           className="hidden"
@@ -2077,10 +2330,10 @@ export default function NewClientPage() {
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            disabled={!canEdit}
+                            disabled={!canEdit || rowBusy}
                             onClick={() => {
                               const el = document.getElementById(
-                                `file-${row.key}`
+                                `file-${row.key}`,
                               ) as HTMLInputElement | null;
                               el?.click();
                             }}
@@ -2100,13 +2353,39 @@ export default function NewClientPage() {
                         <button
                           type="button"
                           onClick={() => handleDeleteRow(row)}
-                          disabled={!canEdit}
+                          disabled={!canEdit || rowBusy}
                           className="rounded-lg bg-rose-600 px-4 h-9 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-60"
                         >
                           حذف
                         </button>
                       </div>
                     </div>
+                    {row.status && row.status !== "idle" ? (
+                      <p
+                        className={`mt-2 text-xs text-right ${
+                          row.status === "success"
+                            ? "text-emerald-600"
+                            : row.status === "error"
+                              ? "text-rose-600"
+                              : "text-slate-600"
+                        }`}
+                      >
+                        {row.status === "uploading"
+                          ? "جارٍ رفع الملف..."
+                          : row.status === "saving"
+                            ? "جارٍ حفظ البيانات..."
+                            : row.status === "success"
+                              ? "تم الحفظ"
+                              : row.status === "error"
+                                ? "فشل الحفظ"
+                                : ""}
+                      </p>
+                    ) : null}
+                    {row.error ? (
+                      <p className="mt-1 text-xs text-rose-600 text-right">
+                        {row.error}
+                      </p>
+                    ) : null}
                   </div>
                 );
               })}
@@ -2117,10 +2396,18 @@ export default function NewClientPage() {
             <button
               type="button"
               onClick={addRow}
-              disabled={!canEdit}
+              disabled={!canEdit || loading}
               className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 attention-nudge"
             >
               إضافة مستند جديد
+            </button>
+            <button
+              type="button"
+              onClick={handleRetryFailed}
+              disabled={loading || failedRowsCount === 0}
+              className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-60"
+            >
+              إعادة المحاولة للصفوف الفاشلة
             </button>
             <button
               type="button"
@@ -2131,6 +2418,30 @@ export default function NewClientPage() {
               {loading ? "جاري الحفظ..." : "حفظ المستندات"}
             </button>
           </div>
+
+          {saveProgress ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-right">
+              <div className="flex items-center justify-between">
+                <span>
+                  {saveProgress.done < saveProgress.total
+                    ? "جاري حفظ المستندات..."
+                    : "اكتمل حفظ المستندات"}
+                </span>
+                <span>
+                  {saveProgress.done}/{saveProgress.total}
+                </span>
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded bg-slate-200">
+                <div
+                  className="h-full bg-sky-500 transition-all"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <div className="mt-1 text-xs text-slate-500">
+                نجح {saveProgress.success}، فشل {saveProgress.failed}
+              </div>
+            </div>
+          ) : null}
 
           {message ? (
             <p className="text-lg text-right text-[var(--text-strong)]">
