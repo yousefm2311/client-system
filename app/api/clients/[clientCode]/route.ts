@@ -866,6 +866,7 @@ import { NextResponse } from "next/server";
 import { getAuthUserFromCookies } from "@/lib/auth";
 import { connectMongo } from "@/lib/mongo";
 import { ClientDocumentModel } from "@/models/ClientDocument";
+import { ClientDocCounterModel } from "@/models/ClientDocCounter";
 import { ClientModel } from "@/models/Client";
 import { correctDocName, normalizeDocName } from "@/lib/documents";
 import { getUserBranch, normalizeBranch } from "@/lib/permissions";
@@ -1105,23 +1106,44 @@ export async function POST(
       .select("normalizedDocName")
       .lean();
 
-    let suffix = 0;
+    let currentMax = 0;
     existingDocs.forEach((d) => {
       const norm = (d as any).normalizedDocName as string;
       if (!norm) return;
       const match = norm.match(/[\\s-](\\d+)$/);
       if (match) {
         const num = Number(match[1]);
-        if (!Number.isNaN(num)) suffix = Math.max(suffix, num);
+        if (!Number.isNaN(num)) currentMax = Math.max(currentMax, num);
       } else {
-        suffix = Math.max(suffix, 1);
+        currentMax = Math.max(currentMax, 1);
       }
     });
 
-    if (suffix > 0) {
-      const next = suffix + 1;
-      finalDocName = `${cleanedDocName} ${next}`;
-      finalNormalized = `${baseNorm} ${next}`;
+    const branchKey = branchForDoc || "";
+    const counterDoc = await ClientDocCounterModel.findOneAndUpdate(
+      { clientCode: rawCode, baseNormalized: baseNorm, branch: branchKey },
+      [
+        {
+          $set: {
+            clientCode: { $ifNull: ["$clientCode", rawCode] },
+            baseNormalized: { $ifNull: ["$baseNormalized", baseNorm] },
+            branch: { $ifNull: ["$branch", branchKey] },
+            counter: {
+              $add: [
+                { $max: [{ $ifNull: ["$counter", 0] }, currentMax] },
+                1,
+              ],
+            },
+          },
+        },
+      ],
+      { new: true, upsert: true, updatePipeline: true }
+    ).lean();
+
+    const nextNumber = counterDoc?.counter ?? currentMax + 1;
+    if (nextNumber > 1) {
+      finalDocName = `${cleanedDocName} ${nextNumber}`;
+      finalNormalized = `${baseNorm} ${nextNumber}`;
     }
 
     const doc = await ClientDocumentModel.create({

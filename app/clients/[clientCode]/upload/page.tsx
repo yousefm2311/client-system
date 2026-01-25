@@ -8,6 +8,11 @@ import { z } from "zod";
 import { FileUploadRow } from "@/components/FileUploadRow";
 import { DOC_TYPES, OTHER_DOC_TYPE, extractFileUrl, renameFileWithClientCode } from "@/lib/documents";
 
+const isPdfFile = (file: File) => {
+  const name = file.name?.toLowerCase() ?? "";
+  return file.type === "application/pdf" || name.endsWith(".pdf");
+};
+
 const schema = z
   .object({
     clientName: z.string().optional(),
@@ -15,7 +20,14 @@ const schema = z
     docDate: z.string().optional(),
     file: z
       .custom<FileList>()
-      .refine((files) => files && files.length > 0, "يجب اختيار ملف"),
+      .refine((files) => files && files.length > 0, "يجب اختيار ملف")
+      .refine(
+        (files) => {
+          const file = files?.[0];
+          return file ? isPdfFile(file) : true;
+        },
+        "يسمح بملفات PDF فقط"
+      ),
     replaceExisting: z.boolean().optional(),
     customName: z.string().optional(),
   })

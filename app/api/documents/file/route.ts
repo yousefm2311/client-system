@@ -10,6 +10,39 @@ import { Buffer } from "node:buffer";
 
 export const runtime = "nodejs";
 
+const archiveBase =
+  process.env.ARCHIVE_SERVICE_URL ||
+  process.env.NEXT_PUBLIC_ARCHIVE_SERVICE_URL ||
+  "http://localhost:5000";
+
+const normalizeArchiveUrl = (rawUrl: string) => {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
+  const apiMatch = trimmed.match(/\/?api\/archives\/([0-9a-f]{24})/i);
+  if (apiMatch) {
+    return `${archiveBase}/api/archives/${apiMatch[1]}/download`;
+  }
+
+  const archiveMatch = trimmed.match(/archives\/([0-9a-f]{24})/i);
+  if (archiveMatch) {
+    return `${archiveBase}/api/archives/${archiveMatch[1]}/download`;
+  }
+
+  const idMatch = trimmed.match(/([0-9a-f]{24})/i);
+  if (idMatch) {
+    return `${archiveBase}/api/archives/${idMatch[1]}/download`;
+  }
+
+  if (/^\/?api\/archives\//i.test(trimmed)) {
+    const prefix = trimmed.startsWith("/") ? "" : "/";
+    return `${archiveBase}${prefix}${trimmed}`;
+  }
+
+  return trimmed;
+};
+
 const guessContentType = (ext: string) => {
   const e = ext.toLowerCase();
   if ([".pdf"].includes(e)) return "application/pdf";
@@ -61,12 +94,17 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const fileUrl = (doc as any).fileUrl || (doc as any).filePath;
-  if (!fileUrl || typeof fileUrl !== "string") {
+  const storedUrl = (doc as any).fileUrl || (doc as any).filePath;
+  if (!storedUrl || typeof storedUrl !== "string") {
     return NextResponse.json({ message: "رابط الملف غير متوفر." }, { status: 404 });
   }
 
   try {
+    const fileUrl = normalizeArchiveUrl(storedUrl);
+    if (!fileUrl || !/^https?:\/\//i.test(fileUrl)) {
+      return NextResponse.json({ message: "Invalid file URL." }, { status: 404 });
+    }
+
     const cookieHeader = request.headers.get("cookie") || undefined;
     const res = await fetch(fileUrl, {
       headers: {
@@ -88,10 +126,10 @@ export async function GET(request: NextRequest) {
     const looksLikeZip =
       contentType.includes("application/zip") ||
       contentType.includes("application/x-zip") ||
-      /\.zip(\?|$)/i.test(fileUrl);
+      /\.zip(\?|$)/i.test(storedUrl);
 
     let bufferToSend: Uint8Array = new Uint8Array(arrayBuffer);
-    let ext = pickExt(fileUrl) || ".pdf";
+    let ext = pickExt(storedUrl) || ".pdf";
 
     if (looksLikeZip) {
       try {

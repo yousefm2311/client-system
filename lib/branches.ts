@@ -63,11 +63,11 @@ export async function getAllBranches(): Promise<BranchOption[]> {
         "SELECT BranchCode, BranchDesc FROM [Attendance].[Code].[Branch] ORDER BY BranchDesc"
       );
     return (result.recordset || [])
-      .map((r: any) => ({
+      .map((r: any): BranchOption => ({
         code: normalizeBranchCode(r.BranchCode),
         name: (r.BranchDesc ?? "").trim(),
       }))
-      .filter((b) => b.code && b.name);
+      .filter((b: BranchOption) => b.code && b.name);
   } catch (err) {
     console.error("Failed to fetch branches:", err);
     return [];

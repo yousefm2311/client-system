@@ -44,6 +44,11 @@ const toInputDate = (date?: string | Date | null) => {
   return d.toISOString().slice(0, 10);
 };
 
+const isPdfFile = (file: File) => {
+  const name = file.name?.toLowerCase() ?? "";
+  return file.type === "application/pdf" || name.endsWith(".pdf");
+};
+
 export function DocumentsClient({ docs, clientCode, clientName }: Props) {
   const [documents, setDocuments] = useState<EditableDoc[]>(() =>
     docs.map((doc) => {
@@ -77,9 +82,18 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
 
   const handleFileChange = (docId: string | number, fileList: FileList | null) => {
     const file = fileList?.[0];
+    if (file && !isPdfFile(file)) {
+      updateDocState(docId, {
+        file: undefined,
+        fileLabel: undefined,
+        error: "ÙØ³ÙØ­ Ø¨ÙÙÙØ§Øª PDF ÙÙØ·",
+      });
+      return;
+    }
     updateDocState(docId, {
       file,
       fileLabel: file ? file.name : undefined,
+      error: "",
     });
   };
 
@@ -268,6 +282,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
                 </label>
                 <input
                   type="file"
+                  accept=".pdf,application/pdf"
                   onChange={(e) => handleFileChange(doc.DocId, e.target.files)}
                   className="text-sm"
                 />

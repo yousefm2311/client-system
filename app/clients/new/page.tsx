@@ -1590,6 +1590,11 @@ const matchDocType = (name: string) => {
   return DOC_TYPES.find((t) => normalizeDocName(t) === normalized);
 };
 
+const isPdfFile = (file: File) => {
+  const name = file.name?.toLowerCase() ?? "";
+  return file.type === "application/pdf" || name.endsWith(".pdf");
+};
+
 const runWithConcurrency = async <T,>(
   tasks: Array<() => Promise<T>>,
   limit: number,
@@ -1964,6 +1969,9 @@ const makeEmptyRow = (): DocRowState => ({
           let fileUrl: string | undefined = row.existingPath;
 
           if (row.file) {
+            if (!isPdfFile(row.file)) {
+              throw new Error("يسمح بملفات PDF فقط");
+            }
             updateRow(row.key, { status: "uploading", error: "" });
             const formData = new FormData();
             const renamedFile = renameFileWithClientCode(
@@ -2038,13 +2046,32 @@ const makeEmptyRow = (): DocRowState => ({
         }
       };
 
-      const tasks = rowsToSave.map((row) => async () => {
-        const result = await processRow(row);
-        updateProgress(result.ok);
-        return result;
+      const grouped = new Map<string, PreparedRow[]>();
+      rowsToSave.forEach((item) => {
+        const key = normalizeDocName(item.docName) || item.docName.toLowerCase();
+        const group = grouped.get(key);
+        if (group) {
+          group.push(item);
+        } else {
+          grouped.set(key, [item]);
+        }
       });
 
-      const results = await runWithConcurrency(tasks, MAX_PARALLEL_UPLOADS);
+      const groupTasks = Array.from(grouped.values()).map((group) => async () => {
+        const groupResults: Array<{ ok: boolean }> = [];
+        for (const item of group) {
+          const result = await processRow(item);
+          updateProgress(result.ok);
+          groupResults.push(result);
+        }
+        return groupResults;
+      });
+
+      const groupedResults = await runWithConcurrency(
+        groupTasks,
+        MAX_PARALLEL_UPLOADS,
+      );
+      const results = groupedResults.flat();
       const successCount = results.filter((r) => r.ok).length;
       const failedCount = results.length - successCount;
 
@@ -2316,9 +2343,20 @@ const makeEmptyRow = (): DocRowState => ({
                         <input
                           id={`file-${row.key}`}
                           type="file"
+                          accept=".pdf,application/pdf"
                           disabled={!canEdit || rowBusy}
                           onChange={(e) => {
                             const file = e.target.files?.[0];
+                            if (file && !isPdfFile(file)) {
+                              updateRow(row.key, {
+                                file: undefined,
+                                fileLabel: undefined,
+                                error: "يسمح بملفات PDF فقط",
+                                status: "error",
+                              });
+                              e.target.value = "";
+                              return;
+                            }
                             updateRow(row.key, {
                               file,
                               fileLabel: file ? file.name : undefined,

@@ -11,7 +11,7 @@ export type UploadFormValues = {
 
 type Props = {
   control: Control<UploadFormValues>;
-  docTypes: string[];
+  docTypes: readonly string[];
 };
 
 export function FileUploadRow({ control, docTypes }: Props) {
@@ -66,7 +66,7 @@ export function FileUploadRow({ control, docTypes }: Props) {
             </label>
             <input
               type="file"
-              accept=".pdf,.jpg,.png,.jpeg,.doc,.docx,.xls,.xlsx,.zip,.rar"
+              accept=".pdf,application/pdf"
               onChange={(e) => field.onChange(e.target.files)}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
               required

@@ -60,6 +60,7 @@ export const extractFileUrl = (data: unknown): string | undefined => {
     anyData.fileUrl ||
     anyData.filePath ||
     anyData.archivePath ||
+    anyData.archiveDownloadUrl ||
     anyData.url ||
     anyData.path ||
     anyData.location;

@@ -11,6 +11,39 @@ import { correctDocName, buildDocumentFileName } from "@/lib/documents";
 
 export const runtime = "nodejs";
 
+const archiveBase =
+  process.env.ARCHIVE_SERVICE_URL ||
+  process.env.NEXT_PUBLIC_ARCHIVE_SERVICE_URL ||
+  "http://localhost:5000";
+
+const normalizeArchiveUrl = (rawUrl: string) => {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
+  const apiMatch = trimmed.match(/\/?api\/archives\/([0-9a-f]{24})/i);
+  if (apiMatch) {
+    return `${archiveBase}/api/archives/${apiMatch[1]}/download`;
+  }
+
+  const archiveMatch = trimmed.match(/archives\/([0-9a-f]{24})/i);
+  if (archiveMatch) {
+    return `${archiveBase}/api/archives/${archiveMatch[1]}/download`;
+  }
+
+  const idMatch = trimmed.match(/([0-9a-f]{24})/i);
+  if (idMatch) {
+    return `${archiveBase}/api/archives/${idMatch[1]}/download`;
+  }
+
+  if (/^\/?api\/archives\//i.test(trimmed)) {
+    const prefix = trimmed.startsWith("/") ? "" : "/";
+    return `${archiveBase}${prefix}${trimmed}`;
+  }
+
+  return trimmed;
+};
+
 const pickExt = (url: string) => {
   try {
     const clean = url.split("?")[0];
@@ -32,15 +65,17 @@ export async function GET(request: NextRequest) {
 
   const { searchParams } = new URL(request.url);
   const clientCodeParam = searchParams.get("clientCode");
-  const clientCode = Number(clientCodeParam);
+  const clientCode = clientCodeParam?.trim() ?? "";
 
-  if (!clientCodeParam || Number.isNaN(clientCode)) {
+  if (!clientCode) {
     return NextResponse.json({ message: "معرّف العميل clientCode غير صالح." }, { status: 400 });
   }
 
   await connectMongo();
 
-  const client = await ClientModel.findOne({ clientCode }).lean();
+  const client = await ClientModel.findOne({
+    $or: [{ clientCode }, { clientCodeRaw: clientCode }],
+  }).lean();
   if (!client) {
     return NextResponse.json({ message: "العميل غير موجود." }, { status: 404 });
   }
@@ -56,8 +91,14 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  const docClientCode = (client as any).clientCode ?? clientCode;
+  const zipClientCode =
+    (client as any).clientCodeRaw ?? (client as any).clientCode ?? clientCode;
+
   const docs = await ClientDocumentModel.find(
-    canAll ? { clientCode } : { clientCode, branch: userBranch }
+    canAll
+      ? { clientCode: docClientCode }
+      : { clientCode: docClientCode, branch: userBranch }
   )
     .sort({ createdAt: -1 })
     .lean();
@@ -73,8 +114,10 @@ export async function GET(request: NextRequest) {
   let successCount = 0;
 
   for (const doc of docs) {
-    const url = (doc as any).fileUrl || (doc as any).filePath;
-    if (!url || typeof url !== "string") continue;
+    const storedUrl = (doc as any).fileUrl || (doc as any).filePath;
+    if (!storedUrl || typeof storedUrl !== "string") continue;
+    const url = normalizeArchiveUrl(storedUrl);
+    if (!url || !/^https?:\/\//i.test(url)) continue;
 
     try {
       const cookieHeader = request.headers.get("cookie") || undefined;
@@ -93,7 +136,7 @@ export async function GET(request: NextRequest) {
       const looksLikeZip =
         contentType.includes("application/zip") ||
         contentType.includes("application/x-zip") ||
-        /\.zip(\?|$)/i.test(url);
+        /\.zip(\?|$)/i.test(storedUrl);
 
       if (looksLikeZip) {
         try {
@@ -103,7 +146,7 @@ export async function GET(request: NextRequest) {
           for (const entry of entries) {
             const innerBuffer = await entry.async("arraybuffer");
             const entryExt = pickExt(entry.name) || ".pdf";
-            const zipName = buildDocumentFileName(docName, clientCode, `file${entryExt}`);
+            const zipName = buildDocumentFileName(docName, zipClientCode, `file${entryExt}`);
             zip.file(zipName, innerBuffer);
             successCount++;
           }
@@ -113,8 +156,8 @@ export async function GET(request: NextRequest) {
         }
       }
 
-      const ext = pickExt(url) || ".pdf";
-      const zipName = buildDocumentFileName(docName, clientCode, `file${ext}`);
+      const ext = pickExt(storedUrl) || ".pdf";
+      const zipName = buildDocumentFileName(docName, zipClientCode, `file${ext}`);
       zip.file(zipName, arrayBuffer);
       successCount++;
     } catch {
@@ -146,7 +189,7 @@ export async function GET(request: NextRequest) {
     status: 200,
     headers: {
       "Content-Type": "application/zip",
-      "Content-Disposition": `attachment; filename="ClientDocs_${clientCode}.zip"`,
+      "Content-Disposition": `attachment; filename="ClientDocs_${zipClientCode}.zip"`,
     },
   });
 }
