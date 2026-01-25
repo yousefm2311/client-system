@@ -1533,6 +1533,8 @@ import {
   normalizeDocName,
   renameFileWithClientCode,
 } from "@/lib/documents";
+import { uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { ensureArchiveAvailable } from "@/lib/archive-health";
 import { normalizeBranch as normalizeBranchPerm } from "@/lib/permissions";
 import {
   canAccessAllBranches,
@@ -1554,6 +1556,7 @@ type DocRowState = {
   existingPath?: string;
   status?: DocRowStatus;
   error?: string;
+  retryCount?: number;
 };
 
 type ExistingDoc = {
@@ -1578,7 +1581,26 @@ type PreparedRow = {
   docDateValue: string;
 };
 
-const MAX_PARALLEL_UPLOADS = 3;
+const MAX_PARALLEL_UPLOADS_DEFAULT = 3;
+const MAX_PARALLEL_UPLOADS_SETTING = Number(
+  process.env.NEXT_PUBLIC_MAX_PARALLEL_UPLOADS ?? MAX_PARALLEL_UPLOADS_DEFAULT,
+);
+const MAX_PARALLEL_UPLOADS =
+  Number.isFinite(MAX_PARALLEL_UPLOADS_SETTING) &&
+  MAX_PARALLEL_UPLOADS_SETTING > 0
+    ? MAX_PARALLEL_UPLOADS_SETTING
+    : MAX_PARALLEL_UPLOADS_DEFAULT;
+const ARCHIVE_MAX_RETRIES = 2;
+const ARCHIVE_MAX_ATTEMPTS = ARCHIVE_MAX_RETRIES + 1;
+const ARCHIVE_UNAVAILABLE_MESSAGE =
+  "خدمة الأرشفة غير متاحة، حاول لاحقًا";
+const MAX_FILE_SIZE_MB = Number(process.env.NEXT_PUBLIC_MAX_FILE_SIZE_MB ?? 50);
+const MAX_FILE_SIZE_BYTES = Number.isFinite(MAX_FILE_SIZE_MB)
+  ? MAX_FILE_SIZE_MB * 1024 * 1024
+  : 50 * 1024 * 1024;
+const MAX_FILE_SIZE_LABEL = Number.isFinite(MAX_FILE_SIZE_MB)
+  ? `${MAX_FILE_SIZE_MB}MB`
+  : "50MB";
 
 const makeId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -1594,6 +1616,9 @@ const isPdfFile = (file: File) => {
   const name = file.name?.toLowerCase() ?? "";
   return file.type === "application/pdf" || name.endsWith(".pdf");
 };
+
+const isFileSizeOk = (file: File) => file.size <= MAX_FILE_SIZE_BYTES;
+const fileSizeError = `حجم الملف أكبر من الحد المسموح (${MAX_FILE_SIZE_LABEL}).`;
 
 const runWithConcurrency = async <T,>(
   tasks: Array<() => Promise<T>>,
@@ -1960,6 +1985,8 @@ const makeEmptyRow = (): DocRowState => ({
         });
       };
 
+      let archiveUnavailableHit = false;
+
       const processRow = async ({
         row,
         docName,
@@ -1972,7 +1999,10 @@ const makeEmptyRow = (): DocRowState => ({
             if (!isPdfFile(row.file)) {
               throw new Error("يسمح بملفات PDF فقط");
             }
-            updateRow(row.key, { status: "uploading", error: "" });
+            if (!isFileSizeOk(row.file)) {
+              throw new Error(fileSizeError);
+            }
+            await ensureArchiveAvailable(ARCHIVE_UNAVAILABLE_MESSAGE);
             const formData = new FormData();
             const renamedFile = renameFileWithClientCode(
               row.file,
@@ -1982,15 +2012,19 @@ const makeEmptyRow = (): DocRowState => ({
             formData.append("file", renamedFile);
             formData.append("docName", docName);
             formData.append("docDate", docDateValue);
-            const uploadRes = await fetch(
-              `/api/archives/upload?clientCode=${encodeURIComponent(trimmedClientCode)}`,
-              { method: "POST", body: formData },
-            );
-            const uploadData = await uploadRes.json().catch(() => ({}));
-            if (!uploadRes.ok)
-              throw new Error(
-                uploadData.message || "تعذر رفع الملف أو الاتصال بالخدمة.",
-              );
+            const { data: uploadData } = await uploadArchiveWithRetry({
+              clientCode: trimmedClientCode,
+              formData,
+              maxRetries: ARCHIVE_MAX_RETRIES,
+              defaultErrorMessage: "تعذر رفع الملف أو الاتصال بخدمة الأرشفة.",
+              timeoutMessage: "انتهت مهلة الاتصال بخدمة الأرشفة.",
+              onAttempt: (attempt) =>
+                updateRow(row.key, {
+                  status: "uploading",
+                  error: "",
+                  retryCount: attempt,
+                }),
+            });
             fileUrl = extractFileUrl(uploadData);
             if (!fileUrl)
               throw new Error("لم يتم إرجاع رابط الملف من خدمة الأرشفة.");
@@ -2000,7 +2034,11 @@ const makeEmptyRow = (): DocRowState => ({
             throw new Error("أرفق ملفاً للمستند.");
           }
 
-          updateRow(row.key, { status: "saving", error: "" });
+          updateRow(row.key, {
+            status: "saving",
+            error: "",
+            retryCount: undefined,
+          });
           const saveRes = await fetch(`/api/clients/${trimmedClientCode}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -2035,13 +2073,29 @@ const makeEmptyRow = (): DocRowState => ({
             fileLabel: undefined,
             status: "success",
             error: "",
+            retryCount: undefined,
           });
 
           return { ok: true };
         } catch (err) {
-          const errorMessage =
+          const attempts =
+            err && typeof (err as { attempts?: number }).attempts === "number"
+              ? (err as { attempts?: number }).attempts
+              : undefined;
+          const baseMessage =
             err instanceof Error ? err.message : "تعذر حفظ المستند.";
-          updateRow(row.key, { status: "error", error: errorMessage });
+          const errorMessage =
+            attempts && attempts > 1
+              ? `${baseMessage} (بعد ${attempts} محاولات)`
+              : baseMessage;
+          if (errorMessage.startsWith(ARCHIVE_UNAVAILABLE_MESSAGE)) {
+            archiveUnavailableHit = true;
+          }
+          updateRow(row.key, {
+            status: "error",
+            error: errorMessage,
+            retryCount: attempts,
+          });
           return { ok: false };
         }
       };
@@ -2084,7 +2138,12 @@ const makeEmptyRow = (): DocRowState => ({
         if (failedCount) parts.push(`فشل حفظ ${failedCount} مستند`);
         if (invalidRows.length)
           parts.push(`يوجد ${invalidRows.length} مستندات غير مكتملة`);
-        setMessage(`${parts.join("، ")}.`);
+        const summary = `${parts.join("، ")}.`;
+        setMessage(
+          archiveUnavailableHit
+            ? `${summary} ${ARCHIVE_UNAVAILABLE_MESSAGE}`
+            : summary,
+        );
       }
     } catch (err) {
       setSaveProgress(null);
@@ -2357,6 +2416,16 @@ const makeEmptyRow = (): DocRowState => ({
                               e.target.value = "";
                               return;
                             }
+                            if (file && !isFileSizeOk(file)) {
+                              updateRow(row.key, {
+                                file: undefined,
+                                fileLabel: undefined,
+                                error: fileSizeError,
+                                status: "error",
+                              });
+                              e.target.value = "";
+                              return;
+                            }
                             updateRow(row.key, {
                               file,
                               fileLabel: file ? file.name : undefined,
@@ -2410,7 +2479,11 @@ const makeEmptyRow = (): DocRowState => ({
                         }`}
                       >
                         {row.status === "uploading"
-                          ? "جارٍ رفع الملف..."
+                          ? `جارٍ رفع الملف...${
+                              row.retryCount
+                                ? ` (محاولة ${row.retryCount}/${ARCHIVE_MAX_ATTEMPTS})`
+                                : ""
+                            }`
                           : row.status === "saving"
                             ? "جارٍ حفظ البيانات..."
                             : row.status === "success"

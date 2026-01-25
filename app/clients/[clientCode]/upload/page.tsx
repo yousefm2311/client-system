@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
@@ -7,11 +7,27 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { FileUploadRow } from "@/components/FileUploadRow";
 import { DOC_TYPES, OTHER_DOC_TYPE, extractFileUrl, renameFileWithClientCode } from "@/lib/documents";
+import { uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { ensureArchiveAvailable } from "@/lib/archive-health";
 
 const isPdfFile = (file: File) => {
   const name = file.name?.toLowerCase() ?? "";
   return file.type === "application/pdf" || name.endsWith(".pdf");
 };
+
+const MAX_FILE_SIZE_MB = Number(process.env.NEXT_PUBLIC_MAX_FILE_SIZE_MB ?? 50);
+const MAX_FILE_SIZE_BYTES = Number.isFinite(MAX_FILE_SIZE_MB)
+  ? MAX_FILE_SIZE_MB * 1024 * 1024
+  : 50 * 1024 * 1024;
+const MAX_FILE_SIZE_LABEL = Number.isFinite(MAX_FILE_SIZE_MB)
+  ? `${MAX_FILE_SIZE_MB}MB`
+  : "50MB";
+const fileSizeError = `حجم الملف أكبر من الحد المسموح (${MAX_FILE_SIZE_LABEL}).`;
+const isFileSizeOk = (file: File) => file.size <= MAX_FILE_SIZE_BYTES;
+
+const ARCHIVE_MAX_RETRIES = 2;
+const ARCHIVE_UNAVAILABLE_MESSAGE =
+  "خدمة الأرشفة غير متاحة، حاول لاحقًا";
 
 const schema = z
   .object({
@@ -20,13 +36,20 @@ const schema = z
     docDate: z.string().optional(),
     file: z
       .custom<FileList>()
-      .refine((files) => files && files.length > 0, "يجب اختيار ملف")
+      .refine((files) => files && files.length > 0, "ÙŠØ¬Ø¨ Ø§Ø®ØªÙŠØ§Ø± Ù…Ù„Ù")
       .refine(
         (files) => {
           const file = files?.[0];
           return file ? isPdfFile(file) : true;
         },
-        "يسمح بملفات PDF فقط"
+        "ÙŠØ³Ù…Ø­ Ø¨Ù…Ù„ÙØ§Øª PDF ÙÙ‚Ø·"
+      )
+      .refine(
+        (files) => {
+          const file = files?.[0];
+          return file ? isFileSizeOk(file) : true;
+        },
+        fileSizeError
       ),
     replaceExisting: z.boolean().optional(),
     customName: z.string().optional(),
@@ -36,7 +59,7 @@ const schema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["customName"],
-        message: "أدخل اسم المستند",
+        message: "Ø£Ø¯Ø®Ù„ Ø§Ø³Ù… Ø§Ù„Ù…Ø³ØªÙ†Ø¯",
       });
     }
   });
@@ -74,34 +97,30 @@ export default function UploadPage() {
 
     try {
       const file = data.file[0];
-      
+
       const docName =
         data.docType === OTHER_DOC_TYPE
           ? data.customName?.trim() || OTHER_DOC_TYPE
           : data.docType;
-const renamedFile = renameFileWithClientCode(file, docName, clientCode);
+      await ensureArchiveAvailable(ARCHIVE_UNAVAILABLE_MESSAGE);
+      const renamedFile = renameFileWithClientCode(file, docName, clientCode);
       const formData = new FormData();
       formData.append("file", renamedFile);
       formData.append("docName", docName);
       if (data.docDate) formData.append("docDate", data.docDate);
 
-      const uploadRes = await fetch(
-        `/api/archives/upload?clientCode=${encodeURIComponent(clientCode)}`,
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
-
-      const uploadData = await uploadRes.json().catch(() => ({}));
-      if (!uploadRes.ok) {
-        throw new Error(uploadData.message || "تعذر رفع الملف");
-      }
+      const { data: uploadData } = await uploadArchiveWithRetry({
+        clientCode,
+        formData,
+        maxRetries: ARCHIVE_MAX_RETRIES,
+        defaultErrorMessage: "تعذر رفع الملف أو الاتصال بخدمة الأرشفة.",
+        timeoutMessage: "انتهت مهلة الاتصال بخدمة الأرشفة.",
+      });
 
       const fileUrl = extractFileUrl(uploadData);
 
       if (!fileUrl) {
-        throw new Error("لم يتم إرجاع رابط الملف من خدمة الأرشفة");
+        throw new Error("Ù„Ù… ÙŠØªÙ… Ø¥Ø±Ø¬Ø§Ø¹ Ø±Ø§Ø¨Ø· Ø§Ù„Ù…Ù„Ù Ù…Ù† Ø®Ø¯Ù…Ø© Ø§Ù„Ø£Ø±Ø´ÙØ©");
       }
 
       const saveRes = await fetch(`/api/clients/${clientCode}`, {
@@ -119,13 +138,23 @@ const renamedFile = renameFileWithClientCode(file, docName, clientCode);
 
       const saveData = await saveRes.json().catch(() => ({}));
       if (!saveRes.ok) {
-        throw new Error(saveData.message || "تعذر حفظ المستند");
+        throw new Error(saveData.message || "ØªØ¹Ø°Ø± Ø­ÙØ¸ Ø§Ù„Ù…Ø³ØªÙ†Ø¯");
       }
 
-      setMessage("تم حفظ المستند بنجاح");
+      setMessage("ØªÙ… Ø­ÙØ¸ Ø§Ù„Ù…Ø³ØªÙ†Ø¯ Ø¨Ù†Ø¬Ø§Ø­");
       router.refresh();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "حدث خطأ غير متوقع");
+      const attempts =
+        error && typeof (error as { attempts?: number }).attempts === "number"
+          ? (error as { attempts?: number }).attempts
+          : undefined;
+      const baseMessage =
+        error instanceof Error ? error.message : "Ø­Ø¯Ø« Ø®Ø·Ø£ ØºÙŠØ± Ù…ØªÙˆÙ‚Ø¹";
+      const message =
+        attempts && attempts > 1
+          ? `${baseMessage} (Ø¨Ø¹Ø¯ ${attempts} Ù…Ø­Ø§ÙˆÙ„Ø§Øª)`
+          : baseMessage;
+      setMessage(message);
     } finally {
       setSubmitting(false);
     }
@@ -135,9 +164,9 @@ const renamedFile = renameFileWithClientCode(file, docName, clientCode);
     <main className="min-h-screen bg-slate-50 px-6 py-8">
       <div className="mx-auto max-w-3xl space-y-6">
         <div className="flex flex-col gap-1 text-right">
-          <p className="text-sm text-slate-500">رفع مستند جديد</p>
+          <p className="text-sm text-slate-500">Ø±ÙØ¹ Ù…Ø³ØªÙ†Ø¯ Ø¬Ø¯ÙŠØ¯</p>
           <h1 className="text-2xl font-semibold text-slate-900">
-            كود العميل {clientCode}
+            ÙƒÙˆØ¯ Ø§Ù„Ø¹Ù…ÙŠÙ„ {clientCode}
           </h1>
         </div>
 
@@ -146,12 +175,12 @@ const renamedFile = renameFileWithClientCode(file, docName, clientCode);
           className="space-y-4 rounded-xl bg-white p-6 shadow-sm border border-slate-200"
         >
           <div className="space-y-2">
-            <label className="block text-sm font-medium text-slate-700">اسم العميل</label>
+            <label className="block text-sm font-medium text-slate-700">Ø§Ø³Ù… Ø§Ù„Ø¹Ù…ÙŠÙ„</label>
             <input
               type="text"
               {...register("clientName")}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
-              placeholder="(اختياري) يستخدم للتحديث"
+              placeholder="(Ø§Ø®ØªÙŠØ§Ø±ÙŠ) ÙŠØ³ØªØ®Ø¯Ù… Ù„Ù„ØªØ­Ø¯ÙŠØ«"
             />
           </div>
 
@@ -161,7 +190,7 @@ const renamedFile = renameFileWithClientCode(file, docName, clientCode);
           {isOther ? (
             <div className="space-y-2">
               <label className="block text-sm font-medium text-slate-700">
-                اسم المستند (أخرى)
+                Ø§Ø³Ù… Ø§Ù„Ù…Ø³ØªÙ†Ø¯ (Ø£Ø®Ø±Ù‰)
               </label>
               <input
                 type="text"
@@ -183,7 +212,7 @@ const renamedFile = renameFileWithClientCode(file, docName, clientCode);
             disabled={submitting}
             className="w-full rounded-lg bg-sky-600 px-4 py-2 text-white font-semibold hover:bg-sky-700 disabled:opacity-70"
           >
-            {submitting ? "جاري الحفظ..." : "حفظ المستند"}
+            {submitting ? "Ø¬Ø§Ø±ÙŠ Ø§Ù„Ø­ÙØ¸..." : "Ø­ÙØ¸ Ø§Ù„Ù…Ø³ØªÙ†Ø¯"}
           </button>
 
           {message ? (
