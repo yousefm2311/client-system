@@ -1534,6 +1534,7 @@ import {
   renameFileWithClientCode,
 } from "@/lib/documents";
 import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { logClientEvent } from "@/lib/client-log";
 import { ensureArchiveAvailable } from "@/lib/archive-health";
 import { normalizeBranch as normalizeBranchPerm } from "@/lib/permissions";
 import {
@@ -1881,6 +1882,14 @@ const makeEmptyRow = (): DocRowState => ({
       removeRowLocal(row.key, true);
       setMessage("تم حذف المستند بنجاح.");
     } catch (err) {
+      void logClientEvent({
+        action: "document.delete",
+        status: "failure",
+        message: err instanceof Error ? err.message : "تعذر حذف المستند، حاول لاحقاً.",
+        reason: err instanceof TypeError ? "network_error" : "client_error",
+        clientCode: clientCode.trim(),
+        docId: row.docId,
+      });
       setMessage(
         err instanceof Error ? err.message : "تعذر حذف المستند، حاول لاحقاً.",
       );
@@ -2112,6 +2121,15 @@ const makeEmptyRow = (): DocRowState => ({
           const errorMessage = getArchiveUploadErrorMessage(err, {
             fileTooLarge: fileSizeError,
           });
+          void logClientEvent({
+            action: row.docId ? "document.update" : "document.save",
+            status: "failure",
+            message: errorMessage,
+            reason: err instanceof TypeError ? "network_error" : "client_error",
+            clientCode: trimmedClientCode,
+            docId: row.docId,
+            details: { docName },
+          });
           if (errorMessage.startsWith(ARCHIVE_UNAVAILABLE_MESSAGE)) {
             archiveUnavailableHit = true;
           }
@@ -2183,6 +2201,13 @@ const makeEmptyRow = (): DocRowState => ({
             ? err.message
             : fallbackMessage;
       setMessage(resolvedMessage);
+      void logClientEvent({
+        action: "document.save",
+        status: "failure",
+        message: resolvedMessage,
+        reason: err instanceof TypeError ? "network_error" : "client_error",
+        clientCode: trimmedClientCode,
+      });
     } finally {
       setLoading(false);
     }

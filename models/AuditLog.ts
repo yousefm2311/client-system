@@ -12,6 +12,11 @@ const AuditLogSchema = new Schema(
       required: true,
       index: true,
     },
+    source: {
+      type: String,
+      default: "server",
+      index: true,
+    },
     message: {
       type: String,
     },

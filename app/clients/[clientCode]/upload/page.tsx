@@ -8,6 +8,7 @@ import { z } from "zod";
 import { FileUploadRow } from "@/components/FileUploadRow";
 import { DOC_TYPES, OTHER_DOC_TYPE, extractFileUrl, renameFileWithClientCode } from "@/lib/documents";
 import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { logClientEvent } from "@/lib/client-log";
 import { ensureArchiveAvailable } from "@/lib/archive-health";
 
 const isPdfFile = (file: File) => {
@@ -95,13 +96,12 @@ export default function UploadPage() {
     setSubmitting(true);
     setMessage("");
 
+    const docName =
+      data.docType === OTHER_DOC_TYPE
+        ? data.customName?.trim() || OTHER_DOC_TYPE
+        : data.docType;
     try {
       const file = data.file[0];
-
-      const docName =
-        data.docType === OTHER_DOC_TYPE
-          ? data.customName?.trim() || OTHER_DOC_TYPE
-          : data.docType;
       await ensureArchiveAvailable(ARCHIVE_UNAVAILABLE_MESSAGE);
       const renamedFile = renameFileWithClientCode(file, docName, clientCode);
       const formData = new FormData();
@@ -144,11 +144,18 @@ export default function UploadPage() {
       setMessage("تم حفظ المستند بنجاح.");
       router.refresh();
     } catch (error) {
-      setMessage(
-        getArchiveUploadErrorMessage(error, {
-          fileTooLarge: fileSizeError,
-        })
-      );
+      const errorMessage = getArchiveUploadErrorMessage(error, {
+        fileTooLarge: fileSizeError,
+      });
+      setMessage(errorMessage);
+      void logClientEvent({
+        action: "document.save",
+        status: "failure",
+        message: errorMessage,
+        reason: error instanceof TypeError ? "network_error" : "client_error",
+        clientCode,
+        details: { docName },
+      });
     } finally {
       setSubmitting(false);
     }

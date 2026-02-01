@@ -9,6 +9,7 @@ import {
   renameFileWithClientCode,
 } from "@/lib/documents";
 import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { logClientEvent } from "@/lib/client-log";
 import { ensureArchiveAvailable } from "@/lib/archive-health";
 
 export type DocumentRecord = {
@@ -139,6 +140,14 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
       }
       setDocuments((prev) => prev.filter((d) => d.DocId !== docId));
     } catch (error) {
+      void logClientEvent({
+        action: "document.delete",
+        status: "failure",
+        message: error instanceof Error ? error.message : "حدث خطأ أثناء الحذف.",
+        reason: error instanceof TypeError ? "network_error" : "client_error",
+        clientCode: String(clientCode),
+        docId,
+      });
       updateDocState(
         docId,
         { error: error instanceof Error ? error.message : "حدث خطأ أثناء الحذف." }
@@ -226,11 +235,19 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
         fileLabel: undefined,
       });
     } catch (error) {
-      updateDocState(docId, {
-        error: getArchiveUploadErrorMessage(error, {
-          fileTooLarge: fileSizeError,
-        }),
+      const errorMessage = getArchiveUploadErrorMessage(error, {
+        fileTooLarge: fileSizeError,
       });
+      void logClientEvent({
+        action: "document.save",
+        status: "failure",
+        message: errorMessage,
+        reason: error instanceof TypeError ? "network_error" : "client_error",
+        clientCode: String(clientCode),
+        docId,
+        details: { docName },
+      });
+      updateDocState(docId, { error: errorMessage });
     } finally {
       updateDocState(docId, { saving: false });
     }

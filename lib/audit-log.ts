@@ -3,10 +3,12 @@ import { connectMongo } from "@/lib/mongo";
 import { AuditLogModel } from "@/models/AuditLog";
 
 type AuditLogStatus = "success" | "failure";
+type AuditLogSource = "server" | "client";
 
 export type AuditLogEntry = {
   action: string;
   status: AuditLogStatus;
+  source?: AuditLogSource;
   message?: string;
   reason?: string;
   user?: Partial<AuthUser> | null;
@@ -61,6 +63,7 @@ export const recordAuditLog = async (entry: AuditLogEntry) => {
     await AuditLogModel.create({
       action: entry.action,
       status: entry.status,
+      source: entry.source ?? "server",
       message: entry.message,
       reason: entry.reason,
       user: normalizeUser(entry.user),
