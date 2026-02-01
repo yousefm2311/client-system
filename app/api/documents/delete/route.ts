@@ -6,6 +6,7 @@ import { ClientDocumentModel } from "@/models/ClientDocument";
 import { ArchiveModel } from "@/models/Archive";
 import { getUserBranch } from "@/lib/permissions";
 import { canAccessAllBranches } from "@/lib/permissions-special";
+import { recordAuditLog } from "@/lib/audit-log";
 
 type DeleteBody = {
   docId?: number | string;
@@ -28,6 +29,13 @@ const extractArchiveId = (url: string) => {
 export async function POST(request: Request) {
   const user = await getAuthUserFromCookies();
   if (!user) {
+    await recordAuditLog({
+      action: "document.delete",
+      status: "failure",
+      message: "غير مصرح",
+      reason: "unauthorized",
+      request,
+    });
     return NextResponse.json({ message: "غير مصرح" }, { status: 401 });
   }
 
@@ -37,6 +45,14 @@ export async function POST(request: Request) {
   const body = (await request.json()) as DeleteBody;
   const docId = body.docId;
   if (!docId) {
+    await recordAuditLog({
+      action: "document.delete",
+      status: "failure",
+      message: "docId مطلوب",
+      reason: "missing_doc_id",
+      user,
+      request,
+    });
     return NextResponse.json({ message: "docId مطلوب" }, { status: 400 });
   }
 
@@ -45,6 +61,15 @@ export async function POST(request: Request) {
 
     const existing = await ClientDocumentModel.findById(docId).lean();
     if (!existing) {
+      await recordAuditLog({
+        action: "document.delete",
+        status: "failure",
+        message: "المستند غير موجود",
+        reason: "not_found",
+        user,
+        request,
+        docId,
+      });
       return NextResponse.json({ message: "المستند غير موجود" }, { status: 404 });
     }
 
@@ -57,6 +82,16 @@ export async function POST(request: Request) {
 
     const res = await ClientDocumentModel.deleteOne(filter);
     if (res.deletedCount === 0) {
+      await recordAuditLog({
+        action: "document.delete",
+        status: "failure",
+        message: "المستند غير موجود أو ليس لديك صلاحية الحذف",
+        reason: "not_found_or_forbidden",
+        user,
+        request,
+        docId,
+        clientCode: (existing as any).clientCode,
+      });
       return NextResponse.json(
         { message: "المستند غير موجود أو ليس لديك صلاحية الحذف" },
         { status: 404 }
@@ -73,6 +108,17 @@ export async function POST(request: Request) {
         archiveDeleted = true;
       } catch (err) {
         console.error("Failed to delete archive remotely:", err);
+        await recordAuditLog({
+          action: "archive.delete",
+          status: "failure",
+          message: "فشل حذف الملف من خدمة الأرشفة.",
+          reason: err instanceof Error ? err.message : "archive_delete_failed",
+          user,
+          request,
+          docId,
+          clientCode: (existing as any).clientCode,
+          details: { archiveId },
+        });
       }
 
       try {
@@ -82,9 +128,29 @@ export async function POST(request: Request) {
       }
     }
 
+    await recordAuditLog({
+      action: "document.delete",
+      status: "success",
+      message: "تم حذف المستند.",
+      user,
+      request,
+      docId,
+      clientCode: (existing as any).clientCode,
+      details: { archiveDeleted },
+    });
+
     return NextResponse.json({ success: true, archiveDeleted });
   } catch (error) {
     console.error("DeleteClientDoc failed:", error);
+    await recordAuditLog({
+      action: "document.delete",
+      status: "failure",
+      message: "تعذر حذف المستند",
+      reason: error instanceof Error ? error.message : "server_error",
+      user,
+      request,
+      docId,
+    });
     return NextResponse.json({ message: "تعذر حذف المستند" }, { status: 500 });
   }
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { JWT_COOKIE_NAME, authCookieOptions } from "@/lib/auth";
+import { JWT_COOKIE_NAME, authCookieOptions, getAuthUserFromCookies } from "@/lib/auth";
+import { recordAuditLog } from "@/lib/audit-log";
 
 const buildRedirect = (request: Request) => {
   const headers = new Headers(request.headers);
@@ -12,9 +13,25 @@ const buildRedirect = (request: Request) => {
 };
 
 export async function POST(request: Request) {
+  const user = await getAuthUserFromCookies();
+  await recordAuditLog({
+    action: "auth.logout",
+    status: "success",
+    message: "تم تسجيل الخروج.",
+    user: user ?? undefined,
+    request,
+  });
   return buildRedirect(request);
 }
 
 export async function GET(request: Request) {
+  const user = await getAuthUserFromCookies();
+  await recordAuditLog({
+    action: "auth.logout",
+    status: "success",
+    message: "تم تسجيل الخروج.",
+    user: user ?? undefined,
+    request,
+  });
   return buildRedirect(request);
 }

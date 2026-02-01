@@ -7,7 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { FileUploadRow } from "@/components/FileUploadRow";
 import { DOC_TYPES, OTHER_DOC_TYPE, extractFileUrl, renameFileWithClientCode } from "@/lib/documents";
-import { uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
 import { ensureArchiveAvailable } from "@/lib/archive-health";
 
 const isPdfFile = (file: File) => {
@@ -36,13 +36,13 @@ const schema = z
     docDate: z.string().optional(),
     file: z
       .custom<FileList>()
-      .refine((files) => files && files.length > 0, "ÙŠØ¬Ø¨ Ø§Ø®ØªÙŠØ§Ø± Ù…Ù„Ù")
+      .refine((files) => files && files.length > 0, "يجب اختيار ملف")
       .refine(
         (files) => {
           const file = files?.[0];
           return file ? isPdfFile(file) : true;
         },
-        "ÙŠØ³Ù…Ø­ Ø¨Ù…Ù„ÙØ§Øª PDF ÙÙ‚Ø·"
+        "يسمح بملفات PDF فقط"
       )
       .refine(
         (files) => {
@@ -59,7 +59,7 @@ const schema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["customName"],
-        message: "Ø£Ø¯Ø®Ù„ Ø§Ø³Ù… Ø§Ù„Ù…Ø³ØªÙ†Ø¯",
+        message: "أدخل اسم المستند",
       });
     }
   });
@@ -120,7 +120,7 @@ export default function UploadPage() {
       const fileUrl = extractFileUrl(uploadData);
 
       if (!fileUrl) {
-        throw new Error("Ù„Ù… ÙŠØªÙ… Ø¥Ø±Ø¬Ø§Ø¹ Ø±Ø§Ø¨Ø· Ø§Ù„Ù…Ù„Ù Ù…Ù† Ø®Ø¯Ù…Ø© Ø§Ù„Ø£Ø±Ø´ÙØ©");
+        throw new Error("لم يتم إرجاع رابط الملف من خدمة الأرشفة.");
       }
 
       const saveRes = await fetch(`/api/clients/${clientCode}`, {
@@ -138,23 +138,17 @@ export default function UploadPage() {
 
       const saveData = await saveRes.json().catch(() => ({}));
       if (!saveRes.ok) {
-        throw new Error(saveData.message || "ØªØ¹Ø°Ø± Ø­ÙØ¸ Ø§Ù„Ù…Ø³ØªÙ†Ø¯");
+        throw new Error(saveData.message || "تعذر حفظ المستند في قاعدة البيانات.");
       }
 
-      setMessage("ØªÙ… Ø­ÙØ¸ Ø§Ù„Ù…Ø³ØªÙ†Ø¯ Ø¨Ù†Ø¬Ø§Ø­");
+      setMessage("تم حفظ المستند بنجاح.");
       router.refresh();
     } catch (error) {
-      const attempts =
-        error && typeof (error as { attempts?: number }).attempts === "number"
-          ? (error as { attempts?: number }).attempts
-          : undefined;
-      const baseMessage =
-        error instanceof Error ? error.message : "Ø­Ø¯Ø« Ø®Ø·Ø£ ØºÙŠØ± Ù…ØªÙˆÙ‚Ø¹";
-      const message =
-        attempts && attempts > 1
-          ? `${baseMessage} (Ø¨Ø¹Ø¯ ${attempts} Ù…Ø­Ø§ÙˆÙ„Ø§Øª)`
-          : baseMessage;
-      setMessage(message);
+      setMessage(
+        getArchiveUploadErrorMessage(error, {
+          fileTooLarge: fileSizeError,
+        })
+      );
     } finally {
       setSubmitting(false);
     }
@@ -164,9 +158,9 @@ export default function UploadPage() {
     <main className="min-h-screen bg-slate-50 px-6 py-8">
       <div className="mx-auto max-w-3xl space-y-6">
         <div className="flex flex-col gap-1 text-right">
-          <p className="text-sm text-slate-500">Ø±ÙØ¹ Ù…Ø³ØªÙ†Ø¯ Ø¬Ø¯ÙŠØ¯</p>
+          <p className="text-sm text-slate-500">رفع مستند جديد</p>
           <h1 className="text-2xl font-semibold text-slate-900">
-            ÙƒÙˆØ¯ Ø§Ù„Ø¹Ù…ÙŠÙ„ {clientCode}
+            كود العميل {clientCode}
           </h1>
         </div>
 
@@ -175,12 +169,12 @@ export default function UploadPage() {
           className="space-y-4 rounded-xl bg-white p-6 shadow-sm border border-slate-200"
         >
           <div className="space-y-2">
-            <label className="block text-sm font-medium text-slate-700">Ø§Ø³Ù… Ø§Ù„Ø¹Ù…ÙŠÙ„</label>
+            <label className="block text-sm font-medium text-slate-700">اسم العميل</label>
             <input
               type="text"
               {...register("clientName")}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
-              placeholder="(Ø§Ø®ØªÙŠØ§Ø±ÙŠ) ÙŠØ³ØªØ®Ø¯Ù… Ù„Ù„ØªØ­Ø¯ÙŠØ«"
+              placeholder="(اختياري) يستخدم للتحديث"
             />
           </div>
 
@@ -190,7 +184,7 @@ export default function UploadPage() {
           {isOther ? (
             <div className="space-y-2">
               <label className="block text-sm font-medium text-slate-700">
-                Ø§Ø³Ù… Ø§Ù„Ù…Ø³ØªÙ†Ø¯ (Ø£Ø®Ø±Ù‰)
+                اسم المستند (أخرى)
               </label>
               <input
                 type="text"
@@ -212,7 +206,7 @@ export default function UploadPage() {
             disabled={submitting}
             className="w-full rounded-lg bg-sky-600 px-4 py-2 text-white font-semibold hover:bg-sky-700 disabled:opacity-70"
           >
-            {submitting ? "Ø¬Ø§Ø±ÙŠ Ø§Ù„Ø­ÙØ¸..." : "Ø­ÙØ¸ Ø§Ù„Ù…Ø³ØªÙ†Ø¯"}
+            {submitting ? "جاري الحفظ..." : "حفظ المستند"}
           </button>
 
           {message ? (

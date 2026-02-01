@@ -1,4 +1,6 @@
 ﻿import { NextResponse } from "next/server";
+import { getAuthUserFromCookies } from "@/lib/auth";
+import { recordAuditLog } from "@/lib/audit-log";
 
 export const runtime = "nodejs";
 
@@ -18,8 +20,20 @@ const PROXY_RETRY_MAX_DELAY_MS = Number(
 const PROXY_TIMEOUT_MS = Number(
   process.env.ARCHIVE_PROXY_TIMEOUT_MS || 30000
 );
+const MAX_FILE_SIZE_MB = Number(process.env.NEXT_PUBLIC_MAX_FILE_SIZE_MB ?? 50);
+const MAX_FILE_SIZE_BYTES = Number.isFinite(MAX_FILE_SIZE_MB)
+  ? MAX_FILE_SIZE_MB * 1024 * 1024
+  : 50 * 1024 * 1024;
+const MAX_FILE_SIZE_LABEL = Number.isFinite(MAX_FILE_SIZE_MB)
+  ? `${MAX_FILE_SIZE_MB}MB`
+  : "50MB";
+const FILE_SIZE_ERROR_MESSAGE = `حجم الملف أكبر من الحد المسموح (${MAX_FILE_SIZE_LABEL}).`;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const isPdfFile = (file: File) => {
+  const name = file.name?.toLowerCase() ?? "";
+  return file.type === "application/pdf" || name.endsWith(".pdf");
+};
 
 const parseErrorPayload = (payload: unknown) => {
   if (!payload || typeof payload !== "object") {
@@ -37,17 +51,95 @@ const parseErrorPayload = (payload: unknown) => {
 };
 
 export async function POST(request: Request) {
+  let clientCodeForLog: string | null = null;
+  let userForLog: Awaited<ReturnType<typeof getAuthUserFromCookies>> | null = null;
   try {
     const { searchParams } = new URL(request.url);
     const clientCode = searchParams.get("clientCode");
+    clientCodeForLog = clientCode;
     if (!clientCode) {
-      return NextResponse.json({ message: "Ø­Ù‚Ù„ clientCode Ù…Ø·Ù„ÙˆØ¨" }, { status: 400 });
+      await recordAuditLog({
+        action: "archive.upload",
+        status: "failure",
+        message: "حقل كود العميل مطلوب.",
+        reason: "missing_client_code",
+        request,
+      });
+      return NextResponse.json(
+        { message: "حقل كود العميل مطلوب.", code: "INVALID_CLIENT_ID" },
+        { status: 400 }
+      );
     }
 
     const incomingForm = await request.formData();
-    const file = incomingForm.get("file") || incomingForm.get("files");
-    if (!file || !(file instanceof File)) {
-      return NextResponse.json({ message: "ÙŠØ¬Ø¨ Ø¥Ø±Ø³Ø§Ù„ Ù…Ù„Ù ÙˆØ§Ø­Ø¯ Ø¹Ù„Ù‰ Ø§Ù„Ø£Ù‚Ù„" }, { status: 400 });
+    const filesFromFile = incomingForm
+      .getAll("file")
+      .filter((item): item is File => item instanceof File);
+    const filesFromFiles = incomingForm
+      .getAll("files")
+      .filter((item): item is File => item instanceof File);
+    const allFiles = [...filesFromFile, ...filesFromFiles];
+
+    if (allFiles.length === 0) {
+      await recordAuditLog({
+        action: "archive.upload",
+        status: "failure",
+        message: "يجب إرسال ملف واحد على الأقل.",
+        reason: "missing_file",
+        request,
+        clientCode,
+      });
+      return NextResponse.json(
+        { message: "يجب إرسال ملف واحد على الأقل.", code: "VALIDATION_ERROR" },
+        { status: 400 }
+      );
+    }
+    if (allFiles.length > 1) {
+      await recordAuditLog({
+        action: "archive.upload",
+        status: "failure",
+        message: "يسمح برفع ملف واحد في كل مرة.",
+        reason: "upload_limit",
+        request,
+        clientCode,
+        details: { filesCount: allFiles.length },
+      });
+      return NextResponse.json(
+        { message: "يسمح برفع ملف واحد في كل مرة.", code: "UPLOAD_LIMIT" },
+        { status: 400 }
+      );
+    }
+
+    const file = allFiles[0];
+    if (!isPdfFile(file)) {
+      await recordAuditLog({
+        action: "archive.upload",
+        status: "failure",
+        message: "يسمح بملفات PDF فقط.",
+        reason: "invalid_file_type",
+        request,
+        clientCode,
+        details: { fileName: file.name, fileType: file.type },
+      });
+      return NextResponse.json(
+        { message: "يسمح بملفات PDF فقط.", code: "INVALID_FILE_TYPE" },
+        { status: 415 }
+      );
+    }
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      await recordAuditLog({
+        action: "archive.upload",
+        status: "failure",
+        message: FILE_SIZE_ERROR_MESSAGE,
+        reason: "file_too_large",
+        request,
+        clientCode,
+        details: { size: file.size, max: MAX_FILE_SIZE_BYTES },
+      });
+      return NextResponse.json(
+        { message: FILE_SIZE_ERROR_MESSAGE, code: "UPLOAD_LIMIT" },
+        { status: 413 }
+      );
     }
 
     const forwardedFor =
@@ -62,6 +154,8 @@ export async function POST(request: Request) {
     };
 
     const maxAttempts = Math.max(1, PROXY_MAX_RETRIES + 1);
+    const user = await getAuthUserFromCookies().catch(() => null);
+    userForLog = user;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       let archiveRes: Response;
@@ -110,6 +204,18 @@ export async function POST(request: Request) {
         })) || {};
 
       if (archiveRes.ok) {
+        await recordAuditLog({
+          action: "archive.upload",
+          status: "success",
+          message: "تم رفع الملف إلى خدمة الأرشفة.",
+          user: user ?? undefined,
+          request,
+          clientCode,
+          details: {
+            fileName: file.name,
+            size: file.size,
+          },
+        });
         return NextResponse.json(data);
       }
 
@@ -118,11 +224,21 @@ export async function POST(request: Request) {
         RETRYABLE_STATUSES.has(archiveRes.status) && attempt < maxAttempts;
 
       if (!canRetry) {
+        await recordAuditLog({
+          action: "archive.upload",
+          status: "failure",
+          message: message || "تعذر رفع الملف إلى خدمة الأرشفة.",
+          reason: code || `status_${archiveRes.status}`,
+          user: user ?? undefined,
+          request,
+          clientCode,
+          details: { status: archiveRes.status },
+        });
         return NextResponse.json(
           {
             message:
               message ||
-              "ØªØ¹Ø°Ø± Ø±ÙØ¹ Ø§Ù„Ù…Ù„Ù Ø¥Ù„Ù‰ Ø®Ø¯Ù…Ø© Ø§Ù„Ø£Ø±Ø´ÙØ©",
+              "تعذر رفع الملف إلى خدمة الأرشفة.",
             code,
           },
           { status: archiveRes.status }
@@ -140,15 +256,34 @@ export async function POST(request: Request) {
       await sleep(delayMs);
     }
 
+    await recordAuditLog({
+      action: "archive.upload",
+      status: "failure",
+      message: "تعذر رفع الملف إلى خدمة الأرشفة.",
+      reason: "max_retries_exceeded",
+      user: user ?? undefined,
+      request,
+      clientCode,
+    });
     return NextResponse.json(
-      { message: "ØªØ¹Ø°Ø± Ø±ÙØ¹ Ø§Ù„Ù…Ù„Ù Ø¥Ù„Ù‰ Ø®Ø¯Ù…Ø© Ø§Ù„Ø£Ø±Ø´ÙØ©" },
+      { message: "تعذر رفع الملف إلى خدمة الأرشفة." },
       { status: 502 }
     );
   } catch (error) {
     console.error("Archive upload proxy failed:", error);
+    await recordAuditLog({
+      action: "archive.upload",
+      status: "failure",
+      message: "حدث خطأ أثناء رفع الملف لخدمة الأرشفة.",
+      reason: error instanceof Error ? error.message : "server_error",
+      user: userForLog ?? undefined,
+      request,
+      clientCode: clientCodeForLog ?? undefined,
+    });
     return NextResponse.json(
-      { message: "Ø­Ø¯Ø« Ø®Ø·Ø£ Ø£Ø«Ù†Ø§Ø¡ Ø±ÙØ¹ Ø§Ù„Ù…Ù„Ù Ù„Ù„Ø£Ø±Ø´ÙØ©" },
+      { message: "حدث خطأ أثناء رفع الملف لخدمة الأرشفة." },
       { status: 500 }
     );
   }
 }
+

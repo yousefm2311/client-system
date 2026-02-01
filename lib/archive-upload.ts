@@ -1,4 +1,4 @@
-type ArchiveUploadError = Error & {
+export type ArchiveUploadError = Error & {
   status?: number;
   code?: string;
   attempts?: number;
@@ -25,6 +25,8 @@ const NON_RETRYABLE_CODES = new Set([
   "VALIDATION_ERROR",
   "INVALID_CLIENT_ID",
 ]);
+const TIMEOUT_ERROR_CODE = "TIMEOUT";
+const NETWORK_ERROR_CODE = "NETWORK_ERROR";
 
 const sleep = (ms: number) =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -122,8 +124,12 @@ export async function uploadArchiveWithRetry({
       continue;
     } catch (error) {
       if (timeoutId) clearTimeout(timeoutId);
-      const isAbort =
-        error instanceof Error && error.name === "AbortError";
+      const isAbort = error instanceof Error && error.name === "AbortError";
+      const isNetworkError = error instanceof TypeError && !isAbort;
+      const existingError =
+        error && typeof error === "object"
+          ? (error as ArchiveUploadError)
+          : undefined;
       lastError = buildError(
         isAbort
           ? resolvedTimeoutMessage
@@ -132,6 +138,14 @@ export async function uploadArchiveWithRetry({
             : defaultErrorMessage,
         {
           attempts: attempt,
+          status: existingError?.status,
+          code:
+            existingError?.code ??
+            (isAbort
+              ? TIMEOUT_ERROR_CODE
+              : isNetworkError
+                ? NETWORK_ERROR_CODE
+                : undefined),
         },
       );
       if (attempt >= maxAttempts) {
@@ -144,3 +158,99 @@ export async function uploadArchiveWithRetry({
 
   throw lastError;
 }
+
+type ArchiveUploadErrorMessages = {
+  invalidFileType: string;
+  uploadLimit: string;
+  validation: string;
+  invalidClient: string;
+  timeout: string;
+  network: string;
+  rateLimit: string;
+  server: string;
+  unauthorized: string;
+  forbidden: string;
+  notFound: string;
+  fileTooLarge: string;
+  unknown: string;
+};
+
+const DEFAULT_UPLOAD_ERROR_MESSAGES: ArchiveUploadErrorMessages = {
+  invalidFileType: "نوع الملف غير مدعوم. المسموح ملفات PDF فقط.",
+  uploadLimit: "تجاوزت الحد الأقصى لعدد الملفات أو حجمها. قلّل العدد أو الحجم ثم أعد المحاولة.",
+  validation: "بيانات الملف غير مكتملة أو غير صحيحة. تأكد من اختيار المستند والملف.",
+  invalidClient: "كود العميل غير صحيح أو غير موجود.",
+  timeout: "انتهت مهلة الاتصال بخدمة الأرشفة. حاول مرة أخرى.",
+  network: "تعذر الاتصال بالخادم. تحقق من الإنترنت ثم أعد المحاولة.",
+  rateLimit: "تم تجاوز الحد المسموح للطلبات. انتظر قليلًا ثم أعد المحاولة.",
+  server: "حدث خطأ في خدمة الأرشفة. حاول لاحقًا.",
+  unauthorized: "غير مصرح لك برفع الملفات.",
+  forbidden: "ليس لديك صلاحية رفع الملفات.",
+  notFound: "خدمة الأرشفة غير متاحة حاليًا.",
+  fileTooLarge: "حجم الملف أكبر من الحد المسموح.",
+  unknown: "تعذر رفع الملف.",
+};
+
+export const getArchiveUploadErrorMessage = (
+  error: unknown,
+  overrides?: Partial<ArchiveUploadErrorMessages>,
+) => {
+  const messages = { ...DEFAULT_UPLOAD_ERROR_MESSAGES, ...overrides };
+  const err =
+    error && typeof error === "object" ? (error as ArchiveUploadError) : undefined;
+  const code = err?.code;
+  const status = err?.status;
+  let message = "";
+
+  if (code) {
+    switch (code) {
+      case "INVALID_FILE_TYPE":
+        message = messages.invalidFileType;
+        break;
+      case "UPLOAD_LIMIT":
+        message = messages.uploadLimit;
+        break;
+      case "VALIDATION_ERROR":
+        message = messages.validation;
+        break;
+      case "INVALID_CLIENT_ID":
+        message = messages.invalidClient;
+        break;
+      case TIMEOUT_ERROR_CODE:
+        message = messages.timeout;
+        break;
+      case NETWORK_ERROR_CODE:
+        message = messages.network;
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (!message && typeof status === "number") {
+    if (status === 401) message = messages.unauthorized;
+    else if (status === 403) message = messages.forbidden;
+    else if (status === 404) message = messages.notFound;
+    else if (status === 408) message = messages.timeout;
+    else if (status === 413) message = messages.fileTooLarge;
+    else if (status === 415) message = messages.invalidFileType;
+    else if (status === 429) message = messages.rateLimit;
+    else if (status >= 500) message = messages.server;
+  }
+
+  if (!message && error instanceof TypeError) {
+    message = messages.network;
+  }
+
+  if (!message && err?.message) {
+    message = err.message;
+  }
+
+  if (!message) {
+    message = messages.unknown;
+  }
+
+  const attempts =
+    err && typeof err.attempts === "number" ? err.attempts : undefined;
+  return attempts && attempts > 1 ? `${message} (بعد ${attempts} محاولات)` : message;
+};

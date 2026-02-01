@@ -339,6 +339,7 @@ import { ClientModel } from "@/models/Client";
 import { getUserBranch } from "@/lib/permissions";
 import { getBranchName } from "@/lib/branches";
 import { canAccessAllBranches, canCreateClient } from "@/lib/permissions-special";
+import { recordAuditLog } from "@/lib/audit-log";
 
 type CreateBody = {
   clientCode?: string;
@@ -453,10 +454,25 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const user = await getAuthUserFromCookies();
   if (!user) {
+    await recordAuditLog({
+      action: "client.create",
+      status: "failure",
+      message: "يرجى تسجيل الدخول.",
+      reason: "unauthorized",
+      request,
+    });
     return NextResponse.json({ message: "يرجى تسجيل الدخول." }, { status: 401 });
   }
 
   if (!canCreateClient(user)) {
+    await recordAuditLog({
+      action: "client.create",
+      status: "failure",
+      message: "لا تملك صلاحية إضافة العميل.",
+      reason: "forbidden",
+      user,
+      request,
+    });
     return NextResponse.json({ message: "لا تملك صلاحية إضافة العميل." }, { status: 403 });
   }
 
@@ -471,6 +487,15 @@ export async function POST(request: Request) {
       : userBranch;
 
   if (!clientCode || !clientName) {
+    await recordAuditLog({
+      action: "client.create",
+      status: "failure",
+      message: "كود واسم العميل مطلوبان.",
+      reason: "missing_fields",
+      user,
+      request,
+      details: { clientCode, clientName },
+    });
     return NextResponse.json(
       { message: "كود واسم العميل مطلوبان." },
       { status: 400 }
@@ -484,6 +509,15 @@ export async function POST(request: Request) {
       $or: [{ clientCode }, { clientCodeRaw: clientCode }],
     }).lean();
     if (existing) {
+      await recordAuditLog({
+        action: "client.create",
+        status: "failure",
+        message: "العميل موجود بالفعل.",
+        reason: "duplicate",
+        user,
+        request,
+        clientCode,
+      });
       return NextResponse.json(
         { message: "العميل موجود بالفعل." },
         { status: 409 }
@@ -501,6 +535,20 @@ export async function POST(request: Request) {
       createdBranchName: branchName,
     });
 
+    await recordAuditLog({
+      action: "client.create",
+      status: "success",
+      message: "تم إنشاء العميل.",
+      user,
+      request,
+      clientCode,
+      details: {
+        clientName,
+        branch,
+        branchName,
+      },
+    });
+
     return NextResponse.json({
       client: {
         id: doc._id.toString(),
@@ -513,6 +561,16 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Create client failed:", error);
+    await recordAuditLog({
+      action: "client.create",
+      status: "failure",
+      message: "تعذر إنشاء العميل.",
+      reason: error instanceof Error ? error.message : "server_error",
+      user,
+      request,
+      clientCode,
+      details: { clientName, branch },
+    });
     return NextResponse.json(
       { message: "تعذر إنشاء العميل." },
       { status: 500 }

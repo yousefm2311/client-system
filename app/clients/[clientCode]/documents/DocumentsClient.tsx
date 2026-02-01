@@ -8,7 +8,7 @@ import {
   correctDocName,
   renameFileWithClientCode,
 } from "@/lib/documents";
-import { uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
 import { ensureArchiveAvailable } from "@/lib/archive-health";
 
 export type DocumentRecord = {
@@ -122,7 +122,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
   };
 
   const handleDelete = async (docId: string | number) => {
-    const ok = window.confirm("Ø³ÙŠØªÙ… Ø­Ø°Ù Ø§Ù„Ù…Ø³ØªÙ†Ø¯ ÙˆØ§Ù„Ù…Ù„Ù Ù†Ù‡Ø§Ø¦ÙŠØ§Ù‹. Ù‡Ù„ Ø£Ù†Øª Ù…ØªØ£ÙƒØ¯ØŸ");
+    const ok = window.confirm("سيتم حذف المستند والملف نهائيًا. هل أنت متأكد؟");
     if (!ok) return;
 
     updateDocState(docId, { saving: true, error: "" });
@@ -135,13 +135,13 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.message || "Ø­Ø¯Ø« Ø®Ø·Ø£ Ø£Ø«Ù†Ø§Ø¡ Ø§Ù„Ø­Ø°Ù");
+        throw new Error(data.message || "حدث خطأ أثناء الحذف.");
       }
       setDocuments((prev) => prev.filter((d) => d.DocId !== docId));
     } catch (error) {
       updateDocState(
         docId,
-        { error: error instanceof Error ? error.message : "Ø­Ø¯Ø« Ø®Ø·Ø£ Ø£Ø«Ù†Ø§Ø¡ Ø§Ù„Ø­Ø°Ù" }
+        { error: error instanceof Error ? error.message : "حدث خطأ أثناء الحذف." }
       );
     } finally {
       updateDocState(docId, { saving: false });
@@ -155,7 +155,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
       const docName =
         doc.docType === OTHER_DOC_TYPE ? doc.customName.trim() || OTHER_DOC_TYPE : doc.docType;
       if (!docName) {
-        throw new Error("Ø£Ø¯Ø®Ù„ Ø§Ø³Ù… Ø§Ù„Ù…Ø³ØªÙ†Ø¯");
+        throw new Error("أدخل اسم المستند");
       }
 
       let fileUrl = doc.FilePath ?? doc.filePath;
@@ -183,13 +183,13 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
         });
         const uploadedPath = extractFileUrl(uploadData);
         if (!uploadedPath) {
-          throw new Error("Ù„Ù… ÙŠØªÙ… Ø¥Ø±Ø¬Ø§Ø¹ Ø±Ø§Ø¨Ø· Ø§Ù„Ù…Ù„Ù Ù…Ù† Ø®Ø¯Ù…Ø© Ø§Ù„Ø£Ø±Ø´ÙØ©");
+          throw new Error("لم يتم إرجاع رابط الملف من خدمة الأرشفة.");
         }
         fileUrl = uploadedPath;
       }
 
       if (!fileUrl) {
-        throw new Error("Ù„Ø§ ÙŠÙˆØ¬Ø¯ Ù…Ù„Ù Ù…Ø±ØªØ¨Ø· Ø¨Ø§Ù„Ù…Ø³ØªÙ†Ø¯");
+        throw new Error("لا يوجد ملف مرتبط بالمستند.");
       }
 
       const saveRes = await fetch(`/api/clients/${clientCode}`, {
@@ -207,7 +207,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
       });
       const saveData = await saveRes.json().catch(() => ({}));
       if (!saveRes.ok) {
-        throw new Error(saveData.message || "ØªØ¹Ø°Ø± Ø­ÙØ¸ Ø§Ù„Ù…Ø³ØªÙ†Ø¯");
+        throw new Error(saveData.message || "تعذر حفظ المستند في قاعدة البيانات.");
       }
 
       const updated = saveData.document ?? {};
@@ -226,17 +226,11 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
         fileLabel: undefined,
       });
     } catch (error) {
-      const attempts =
-        error && typeof (error as { attempts?: number }).attempts === "number"
-          ? (error as { attempts?: number }).attempts
-          : undefined;
-      const baseMessage =
-        error instanceof Error ? error.message : "Ø­Ø¯Ø« Ø®Ø·Ø£ Ø£Ø«Ù†Ø§Ø¡ Ø§Ù„Ø­ÙØ¸";
-      const message =
-        attempts && attempts > 1
-          ? `${baseMessage} (Ø¨Ø¹Ø¯ ${attempts} Ù…Ø­Ø§ÙˆÙ„Ø§Øª)`
-          : baseMessage;
-      updateDocState(docId, { error: message });
+      updateDocState(docId, {
+        error: getArchiveUploadErrorMessage(error, {
+          fileTooLarge: fileSizeError,
+        }),
+      });
     } finally {
       updateDocState(docId, { saving: false });
     }
@@ -254,7 +248,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
             <div className="flex flex-wrap items-center gap-3">
               <div className="space-y-1">
                 <label className="block text-xs font-medium text-slate-700 text-right">
-                  Ø§Ø³Ù… Ø§Ù„Ù…Ø³ØªÙ†Ø¯
+                  اسم المستند
                 </label>
                 <select
                   value={doc.docType}
@@ -266,27 +260,27 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
                   }
                   className="rounded-lg border border-slate-300 px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
                 >
-                  <option value="">-- Ø§Ø®ØªØ± Ø§Ù„Ù…Ø³ØªÙ†Ø¯ --</option>
+                  <option value="">-- اختر المستند --</option>
                   {docTypeOptions}
                 </select>
               </div>
               {showOther ? (
                 <div className="space-y-1">
                   <label className="block text-xs font-medium text-slate-700 text-right">
-                    Ø§Ø³Ù… Ø¢Ø®Ø±
+                    اسم آخر
                   </label>
                   <input
                     type="text"
                     value={doc.customName}
                     onChange={(e) => updateDocState(doc.DocId, { customName: e.target.value })}
                     className="rounded-lg border border-slate-300 px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-sky-500"
-                    placeholder="Ø§ÙƒØªØ¨ Ø§Ø³Ù… Ø§Ù„Ù…Ø³ØªÙ†Ø¯"
+                    placeholder="اكتب اسم المستند"
                   />
                 </div>
               ) : null}
               <div className="space-y-1">
                 <label className="block text-xs font-medium text-slate-700 text-right">
-                  Ø§Ù„ØªØ§Ø±ÙŠØ®
+                  التاريخ
                 </label>
                 <input
                   type="date"
@@ -297,7 +291,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
               </div>
               <div className="space-y-1">
                 <label className="block text-xs font-medium text-slate-700 text-right">
-                  Ø§Ù„Ù…Ù„Ù Ø§Ù„Ø­Ø§Ù„ÙŠ
+                  الملف الحالي
                 </label>
                 <div className="flex items-center gap-2">
                   <a
@@ -306,7 +300,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
                     rel="noopener noreferrer"
                     className="text-sm text-sky-700 underline"
                   >
-                    Ø¹Ø±Ø¶ Ø§Ù„Ù…Ù„Ù
+                    عرض الملف
                   </a>
                   <span className="text-xs text-slate-500 break-all">
                     {doc.FilePath ?? doc.filePath ?? ""}
@@ -315,7 +309,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
               </div>
               <div className="space-y-1">
                 <label className="block text-xs font-medium text-slate-700 text-right">
-                  Ø§Ø³ØªØ¨Ø¯Ø§Ù„ Ø§Ù„Ù…Ù„Ù
+                  استبدال الملف
                 </label>
                 <input
                   type="file"
@@ -334,7 +328,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
                   disabled={doc.saving}
                   className="rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-700 disabled:opacity-70"
                 >
-                  {doc.saving ? "Ø¬Ø§Ø±Ù Ø§Ù„Ø­ÙØ¸..." : "Ø­ÙØ¸"}
+                  {doc.saving ? "جارٍ الحفظ..." : "حفظ"}
                 </button>
                 <button
                   type="button"
@@ -342,7 +336,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
                   disabled={doc.saving}
                   className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-70"
                 >
-                  Ø­Ø°Ù
+                  حذف
                 </button>
               </div>
             </div>
@@ -353,7 +347,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
         );
       })}
       {documents.length === 0 ? (
-        <p className="text-center text-slate-500">Ù„Ø§ ØªÙˆØ¬Ø¯ Ù…Ø³ØªÙ†Ø¯Ø§Øª Ù…Ø³Ø¬Ù„Ø© Ø¨Ø¹Ø¯</p>
+        <p className="text-center text-slate-500">لا توجد مستندات مسجلة بعد</p>
       ) : null}
     </div>
   );

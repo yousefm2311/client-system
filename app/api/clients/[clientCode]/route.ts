@@ -872,6 +872,7 @@ import { correctDocName, normalizeDocName } from "@/lib/documents";
 import { getUserBranch, normalizeBranch } from "@/lib/permissions";
 import { canAccessAllBranches } from "@/lib/permissions-special";
 import { getBranchNames, getBranchName } from "@/lib/branches";
+import { recordAuditLog } from "@/lib/audit-log";
 
 type InsertBody = {
   clientName?: string;
@@ -989,12 +990,27 @@ export async function POST(
 ) {
   const user = await getAuthUserFromCookies();
   if (!user) {
+    await recordAuditLog({
+      action: "document.save",
+      status: "failure",
+      message: "الرجاء تسجيل الدخول",
+      reason: "unauthorized",
+      request,
+    });
     return NextResponse.json({ message: "الرجاء تسجيل الدخول" }, { status: 401 });
   }
 
   const params = await context.params;
   const rawCode = (params.clientCode ?? "").trim();
   if (!rawCode) {
+    await recordAuditLog({
+      action: "document.save",
+      status: "failure",
+      message: "حقل clientCode مفقود",
+      reason: "missing_client_code",
+      user,
+      request,
+    });
     return NextResponse.json({ message: "حقل clientCode مفقود" }, { status: 400 });
   }
 
@@ -1010,6 +1026,15 @@ export async function POST(
     $or: [{ clientCode: rawCode }, { clientCodeRaw: rawCode }],
   }).lean();
   if (!client) {
+    await recordAuditLog({
+      action: "document.save",
+      status: "failure",
+      message: "العميل غير موجود.",
+      reason: "client_not_found",
+      user,
+      request,
+      clientCode: rawCode,
+    });
     return NextResponse.json({ message: "العميل غير موجود." }, { status: 404 });
   }
 
@@ -1018,6 +1043,15 @@ export async function POST(
   const branchName = await getBranchName(branchForDoc);
 
   if (!canEditAll && clientBranch && clientBranch !== userBranch) {
+    await recordAuditLog({
+      action: "document.save",
+      status: "failure",
+      message: "غير مصرح بتعديل مستندات عميل في فرع آخر.",
+      reason: "forbidden",
+      user,
+      request,
+      clientCode: rawCode,
+    });
     return NextResponse.json(
       { message: "غير مصرح بتعديل مستندات عميل في فرع آخر." },
       { status: 403 }
@@ -1038,6 +1072,16 @@ export async function POST(
     body.files?.[0]?.filePath;
 
   if (!normalizedDocName || !fileUrl) {
+    await recordAuditLog({
+      action: "document.save",
+      status: "failure",
+      message: "يجب إرسال اسم المستند ورابط الملف.",
+      reason: "missing_fields",
+      user,
+      request,
+      clientCode: rawCode,
+      details: { docName: cleanedDocName, fileUrl: Boolean(fileUrl) },
+    });
     return NextResponse.json(
       { message: "يجب إرسال اسم المستند ورابط الملف." },
       { status: 400 }
@@ -1061,6 +1105,16 @@ export async function POST(
           branch: branchForDoc,
         }).lean();
         if (!existing) {
+          await recordAuditLog({
+            action: "document.update",
+            status: "failure",
+            message: "غير مصرح بتعديل هذا المستند.",
+            reason: "forbidden",
+            user,
+            request,
+            clientCode: rawCode,
+            docId,
+          });
           return NextResponse.json(
             { message: "غير مصرح بتعديل هذا المستند." },
             { status: 403 }
@@ -1088,6 +1142,20 @@ export async function POST(
         },
         { new: true }
       ).lean()) as StoredDoc | null;
+
+      await recordAuditLog({
+        action: "document.update",
+        status: "success",
+        message: "تم تحديث المستند.",
+        user,
+        request,
+        clientCode: rawCode,
+        docId,
+        details: {
+          docName: cleanedDocName,
+          fileUrl: Boolean(fileUrl),
+        },
+      });
 
       return NextResponse.json({ document: updatedDoc ? normalizeDoc(updatedDoc) : null });
     }
@@ -1160,13 +1228,41 @@ export async function POST(
       createdAt: now,
     });
 
+    await recordAuditLog({
+      action: "document.create",
+      status: "success",
+      message: "تم حفظ المستند.",
+      user,
+      request,
+      clientCode: rawCode,
+      docId: (doc as any)._id?.toString?.() ?? undefined,
+      details: {
+        docName: finalDocName,
+        fileUrl: Boolean(fileUrl),
+        branch: branchForDoc,
+      },
+    });
+
     return NextResponse.json({
       document: normalizeDoc(doc.toObject() as StoredDoc),
     });
   } catch (error) {
     console.error("Insert client doc failed:", error);
+    await recordAuditLog({
+      action: "document.save",
+      status: "failure",
+      message: "تعذر حفظ المستند في قاعدة البيانات.",
+      reason: error instanceof Error ? error.message : "server_error",
+      user,
+      request,
+      clientCode: rawCode,
+      docId,
+      details: {
+        docName: cleanedDocName,
+      },
+    });
     return NextResponse.json(
-      { message: "تعذر حفظ المستند." },
+      { message: "تعذر حفظ المستند في قاعدة البيانات." },
       { status: 500 }
     );
   }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authCookieOptions, JWT_COOKIE_NAME, signAuthToken } from "@/lib/auth";
 import { getSqlPool, sql } from "@/lib/sql";
+import { recordAuditLog } from "@/lib/audit-log";
 
 const messages = {
   invalidPayload:
@@ -25,6 +26,13 @@ export async function POST(request: Request) {
   try {
     body = await request.json();
   } catch {
+    await recordAuditLog({
+      action: "auth.login",
+      status: "failure",
+      message: messages.invalidPayload,
+      reason: "invalid_payload",
+      request,
+    });
     return NextResponse.json({ message: messages.invalidPayload }, { status: 400 });
   }
 
@@ -32,6 +40,14 @@ export async function POST(request: Request) {
   const password = body.password ?? body.idCard;
 
   if (!empId || !password) {
+    await recordAuditLog({
+      action: "auth.login",
+      status: "failure",
+      message: messages.missingFields,
+      reason: "missing_fields",
+      user: empId ? { empId } : undefined,
+      request,
+    });
     return NextResponse.json({ message: messages.missingFields }, { status: 400 });
   }
 
@@ -47,6 +63,14 @@ export async function POST(request: Request) {
     const row = result.recordset?.[0];
 
     if (!row) {
+      await recordAuditLog({
+        action: "auth.login",
+        status: "failure",
+        message: messages.invalidCredentials,
+        reason: "invalid_credentials",
+        user: { empId },
+        request,
+      });
       return NextResponse.json(
         { message: messages.invalidCredentials },
         { status: 401 }
@@ -65,9 +89,25 @@ export async function POST(request: Request) {
     const response = NextResponse.json({ user: payload });
     response.cookies.set(JWT_COOKIE_NAME, token, authCookieOptions);
 
+    await recordAuditLog({
+      action: "auth.login",
+      status: "success",
+      message: "تم تسجيل الدخول بنجاح.",
+      user: payload,
+      request,
+    });
+
     return response;
   } catch (error) {
     console.error("Login failed:", error);
+    await recordAuditLog({
+      action: "auth.login",
+      status: "failure",
+      message: messages.serverError,
+      reason: error instanceof Error ? error.message : "server_error",
+      user: empId ? { empId } : undefined,
+      request,
+    });
     return NextResponse.json(
       {
         message:

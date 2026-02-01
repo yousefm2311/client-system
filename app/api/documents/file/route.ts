@@ -7,6 +7,7 @@ import { getUserBranch, normalizeBranch } from "@/lib/permissions";
 import { canAccessAllBranches } from "@/lib/permissions-special";
 import { buildDocumentFileName, correctDocName } from "@/lib/documents";
 import { Buffer } from "node:buffer";
+import { recordAuditLog } from "@/lib/audit-log";
 
 export const runtime = "nodejs";
 
@@ -65,6 +66,13 @@ const pickExt = (name: string) => {
 export async function GET(request: NextRequest) {
   const user = await getAuthUserFromCookies();
   if (!user) {
+    await recordAuditLog({
+      action: "document.view",
+      status: "failure",
+      message: "غير مصرح، يرجى تسجيل الدخول.",
+      reason: "unauthorized",
+      request,
+    });
     return NextResponse.json({ message: "غير مصرح، يرجى تسجيل الدخول." }, { status: 401 });
   }
 
@@ -74,12 +82,29 @@ export async function GET(request: NextRequest) {
     searchParams.get("download") === "1" ||
     searchParams.get("download")?.toLowerCase() === "true";
   if (!docId) {
+    await recordAuditLog({
+      action: "document.view",
+      status: "failure",
+      message: "معرّف المستند docId مفقود.",
+      reason: "missing_doc_id",
+      user,
+      request,
+    });
     return NextResponse.json({ message: "معرّف المستند docId مفقود." }, { status: 400 });
   }
 
   await connectMongo();
   const doc = await ClientDocumentModel.findById(docId).lean();
   if (!doc) {
+    await recordAuditLog({
+      action: "document.view",
+      status: "failure",
+      message: "لم يتم العثور على المستند.",
+      reason: "not_found",
+      user,
+      request,
+      docId,
+    });
     return NextResponse.json({ message: "لم يتم العثور على المستند." }, { status: 404 });
   }
 
@@ -88,6 +113,16 @@ export async function GET(request: NextRequest) {
   const docBranch = normalizeBranch((doc as any).branch);
 
   if (!canAll && docBranch && docBranch !== userBranch) {
+    await recordAuditLog({
+      action: "document.view",
+      status: "failure",
+      message: "غير مصرح لك بعرض مستند من فرع آخر.",
+      reason: "forbidden",
+      user,
+      request,
+      docId,
+      clientCode: (doc as any).clientCode,
+    });
     return NextResponse.json(
       { message: "غير مصرح لك بعرض مستند من فرع آخر." },
       { status: 403 }
@@ -96,12 +131,32 @@ export async function GET(request: NextRequest) {
 
   const storedUrl = (doc as any).fileUrl || (doc as any).filePath;
   if (!storedUrl || typeof storedUrl !== "string") {
+    await recordAuditLog({
+      action: "document.view",
+      status: "failure",
+      message: "رابط الملف غير متوفر.",
+      reason: "missing_file_url",
+      user,
+      request,
+      docId,
+      clientCode: (doc as any).clientCode,
+    });
     return NextResponse.json({ message: "رابط الملف غير متوفر." }, { status: 404 });
   }
 
   try {
     const fileUrl = normalizeArchiveUrl(storedUrl);
     if (!fileUrl || !/^https?:\/\//i.test(fileUrl)) {
+      await recordAuditLog({
+        action: "document.view",
+        status: "failure",
+        message: "Invalid file URL.",
+        reason: "invalid_file_url",
+        user,
+        request,
+        docId,
+        clientCode: (doc as any).clientCode,
+      });
       return NextResponse.json({ message: "Invalid file URL." }, { status: 404 });
     }
 
@@ -115,6 +170,16 @@ export async function GET(request: NextRequest) {
     });
 
     if (!res.ok) {
+      await recordAuditLog({
+        action: "document.view",
+        status: "failure",
+        message: "تعذر تحميل الملف من خدمة الأرشفة.",
+        reason: `status_${res.status}`,
+        user,
+        request,
+        docId,
+        clientCode: (doc as any).clientCode,
+      });
       return NextResponse.json(
         { message: "تعذر تحميل الملف من خدمة الأرشفة." },
         { status: 502 }
@@ -138,6 +203,16 @@ export async function GET(request: NextRequest) {
 
         const selected = files.find((f) => f.name.toLowerCase().endsWith(".pdf")) || files[0];
         if (!selected) {
+          await recordAuditLog({
+            action: "document.view",
+            status: "failure",
+            message: "ملف ZIP لا يحتوي على ملفات صالحة.",
+            reason: "zip_empty",
+            user,
+            request,
+            docId,
+            clientCode: (doc as any).clientCode,
+          });
           return NextResponse.json(
             { message: "ملف ZIP لا يحتوي على ملفات صالحة." },
             { status: 500 }
@@ -146,6 +221,16 @@ export async function GET(request: NextRequest) {
         bufferToSend = await selected.async("uint8array");
         ext = pickExt(selected.name) || ".pdf";
       } catch {
+        await recordAuditLog({
+          action: "document.view",
+          status: "failure",
+          message: "تعذر فك ضغط الملف المضغوط.",
+          reason: "zip_extract_failed",
+          user,
+          request,
+          docId,
+          clientCode: (doc as any).clientCode,
+        });
         return NextResponse.json(
           { message: "تعذر فك ضغط الملف المضغوط." },
           { status: 500 }
@@ -168,6 +253,17 @@ export async function GET(request: NextRequest) {
     // استخدم Buffer وضف Content-Length للمتصفح
     const nodeBuffer = Buffer.from(bufferToSend);
 
+    await recordAuditLog({
+      action: "document.view",
+      status: "success",
+      message: "تم عرض الملف بنجاح.",
+      user,
+      request,
+      docId,
+      clientCode: (doc as any).clientCode,
+      details: { forceDownload },
+    });
+
     return new NextResponse(nodeBuffer, {
       status: 200,
       headers: {
@@ -178,6 +274,16 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("Stream document failed:", error);
+    await recordAuditLog({
+      action: "document.view",
+      status: "failure",
+      message: "تعذر عرض الملف، حاول لاحقاً.",
+      reason: error instanceof Error ? error.message : "stream_failed",
+      user,
+      request,
+      docId,
+      clientCode: (doc as any).clientCode,
+    });
     return NextResponse.json(
       { message: "تعذر عرض الملف، حاول لاحقاً." },
       { status: 500 }

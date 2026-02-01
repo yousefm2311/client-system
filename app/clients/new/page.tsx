@@ -1533,7 +1533,7 @@ import {
   normalizeDocName,
   renameFileWithClientCode,
 } from "@/lib/documents";
-import { uploadArchiveWithRetry } from "@/lib/archive-upload";
+import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
 import { ensureArchiveAvailable } from "@/lib/archive-health";
 import { normalizeBranch as normalizeBranchPerm } from "@/lib/permissions";
 import {
@@ -1554,6 +1554,9 @@ type DocRowState = {
   file?: File;
   fileLabel?: string;
   existingPath?: string;
+  originalDocName?: string;
+  originalDocDate?: string;
+  originalPath?: string;
   status?: DocRowStatus;
   error?: string;
   retryCount?: number;
@@ -1665,6 +1668,9 @@ const makeEmptyRow = (): DocRowState => ({
   docType: "",
   customName: "",
   docDate: today(),
+  originalDocName: "",
+  originalDocDate: "",
+  originalPath: "",
   status: "idle",
   error: "",
 });
@@ -1827,6 +1833,11 @@ const makeEmptyRow = (): DocRowState => ({
               file: undefined,
               fileLabel: undefined,
               existingPath: d.FilePath,
+              originalDocName: fixedName,
+              originalDocDate: d.DocDate
+                ? new Date(d.DocDate).toISOString().slice(0, 10)
+                : "",
+              originalPath: d.FilePath,
               status: "idle",
               error: "",
             };
@@ -1909,7 +1920,8 @@ const makeEmptyRow = (): DocRowState => ({
           ? row.customName || row.docType
           : row.docType;
       const docName = baseName.trim();
-      const docDateValue = row.docDate || today();
+      const docDateValue =
+        row.docDate || (row.docId || row.existingPath ? "" : today());
       let error = "";
 
       if (!row.docType) {
@@ -1931,7 +1943,19 @@ const makeEmptyRow = (): DocRowState => ({
     }
 
     const rowsToSave: PreparedRow[] = preparedRows
-      .filter((item) => !item.error)
+      .filter((item) => {
+        if (item.error) return false;
+        const row = item.row;
+        const isExisting = Boolean(row.docId || row.existingPath);
+        if (!isExisting) return true;
+        if (row.file) return true;
+        const originalName = (row.originalDocName ?? "").trim();
+        const originalDate = row.originalDocDate ?? "";
+        return (
+          (item.docName && item.docName !== originalName) ||
+          item.docDateValue !== originalDate
+        );
+      })
       .map(({ row, docName, docDateValue }) => ({
         row,
         docName,
@@ -1939,7 +1963,11 @@ const makeEmptyRow = (): DocRowState => ({
       }));
 
     if (rowsToSave.length === 0) {
-      setMessage("يرجى تصحيح الأخطاء أولاً.");
+      setMessage(
+        invalidRows.length > 0
+          ? "يرجى تصحيح الأخطاء أولاً."
+          : "لا توجد تغييرات لحفظها.",
+      );
       return;
     }
 
@@ -2069,6 +2097,9 @@ const makeEmptyRow = (): DocRowState => ({
             docType: matchedType ? matchedType : OTHER_DOC_TYPE,
             customName: matchedType ? "" : savedName,
             docDate: docDateResult,
+            originalDocName: savedName,
+            originalDocDate: docDateResult,
+            originalPath: updatedDoc.FilePath ?? fileUrl,
             file: undefined,
             fileLabel: undefined,
             status: "success",
@@ -2078,23 +2109,19 @@ const makeEmptyRow = (): DocRowState => ({
 
           return { ok: true };
         } catch (err) {
-          const attempts =
-            err && typeof (err as { attempts?: number }).attempts === "number"
-              ? (err as { attempts?: number }).attempts
-              : undefined;
-          const baseMessage =
-            err instanceof Error ? err.message : "تعذر حفظ المستند.";
-          const errorMessage =
-            attempts && attempts > 1
-              ? `${baseMessage} (بعد ${attempts} محاولات)`
-              : baseMessage;
+          const errorMessage = getArchiveUploadErrorMessage(err, {
+            fileTooLarge: fileSizeError,
+          });
           if (errorMessage.startsWith(ARCHIVE_UNAVAILABLE_MESSAGE)) {
             archiveUnavailableHit = true;
           }
           updateRow(row.key, {
             status: "error",
             error: errorMessage,
-            retryCount: attempts,
+            retryCount:
+              err && typeof (err as { attempts?: number }).attempts === "number"
+                ? (err as { attempts?: number }).attempts
+                : undefined,
           });
           return { ok: false };
         }
@@ -2147,11 +2174,15 @@ const makeEmptyRow = (): DocRowState => ({
       }
     } catch (err) {
       setSaveProgress(null);
-      setMessage(
-        err instanceof Error
-          ? err.message
-          : "تعذر الاتصال بالخادم أو قاعدة البيانات، حاول لاحقاً.",
-      );
+      const fallbackMessage =
+        "تعذر الاتصال بالخادم أو قاعدة البيانات، حاول لاحقًا.";
+      const resolvedMessage =
+        err instanceof TypeError
+          ? "تعذر الاتصال بالخادم، حاول لاحقًا."
+          : err instanceof Error
+            ? err.message
+            : fallbackMessage;
+      setMessage(resolvedMessage);
     } finally {
       setLoading(false);
     }
