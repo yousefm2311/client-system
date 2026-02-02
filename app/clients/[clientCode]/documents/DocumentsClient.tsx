@@ -146,7 +146,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
         message: error instanceof Error ? error.message : "حدث خطأ أثناء الحذف.",
         reason: error instanceof TypeError ? "network_error" : "client_error",
         clientCode: String(clientCode),
-        docId,
+        docId: docId !== undefined ? String(docId) : undefined,
       });
       updateDocState(
         docId,
@@ -159,9 +159,10 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
 
   const handleSave = async (doc: EditableDoc) => {
     const docId = doc.DocId;
+    let docName = "";
     updateDocState(docId, { saving: true, error: "" });
     try {
-      const docName =
+      docName =
         doc.docType === OTHER_DOC_TYPE ? doc.customName.trim() || OTHER_DOC_TYPE : doc.docType;
       if (!docName) {
         throw new Error("أدخل اسم المستند");
@@ -244,7 +245,7 @@ export function DocumentsClient({ docs, clientCode, clientName }: Props) {
         message: errorMessage,
         reason: error instanceof TypeError ? "network_error" : "client_error",
         clientCode: String(clientCode),
-        docId,
+        docId: docId !== undefined ? String(docId) : undefined,
         details: { docName },
       });
       updateDocState(docId, { error: errorMessage });

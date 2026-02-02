@@ -1888,7 +1888,7 @@ const makeEmptyRow = (): DocRowState => ({
         message: err instanceof Error ? err.message : "تعذر حذف المستند، حاول لاحقاً.",
         reason: err instanceof TypeError ? "network_error" : "client_error",
         clientCode: clientCode.trim(),
-        docId: row.docId,
+        docId: row.docId !== undefined ? String(row.docId) : undefined,
       });
       setMessage(
         err instanceof Error ? err.message : "تعذر حذف المستند، حاول لاحقاً.",
@@ -2127,7 +2127,7 @@ const makeEmptyRow = (): DocRowState => ({
             message: errorMessage,
             reason: err instanceof TypeError ? "network_error" : "client_error",
             clientCode: trimmedClientCode,
-            docId: row.docId,
+            docId: row.docId !== undefined ? String(row.docId) : undefined,
             details: { docName },
           });
           if (errorMessage.startsWith(ARCHIVE_UNAVAILABLE_MESSAGE)) {
