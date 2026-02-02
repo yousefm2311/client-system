@@ -863,13 +863,17 @@
 
 
 import { NextResponse } from "next/server";
+import path from "path";
+import fs from "fs/promises";
 import { getAuthUserFromCookies } from "@/lib/auth";
 import { connectMongo } from "@/lib/mongo";
 import { ClientDocumentModel } from "@/models/ClientDocument";
 import { ClientDocCounterModel } from "@/models/ClientDocCounter";
 import { ClientModel } from "@/models/Client";
+import { ArchiveModel } from "@/models/Archive";
+import { UploadFileRecordModel } from "@/models/UploadFileRecord";
 import { correctDocName, normalizeDocName } from "@/lib/documents";
-import { getUserBranch, normalizeBranch } from "@/lib/permissions";
+import { canDeleteClient, getUserBranch, normalizeBranch } from "@/lib/permissions";
 import { canAccessAllBranches } from "@/lib/permissions-special";
 import { getBranchNames, getBranchName } from "@/lib/branches";
 import { recordAuditLog } from "@/lib/audit-log";
@@ -918,6 +922,71 @@ const normalizeDoc = (doc: StoredDoc, branchName?: string) => {
     ClientCode: doc.clientCodeRaw ?? doc.clientCode,
   };
 };
+
+const archiveBase =
+  process.env.ARCHIVE_SERVICE_URL ||
+  process.env.NEXT_PUBLIC_ARCHIVE_SERVICE_URL ||
+  "http://localhost:5000";
+const archiveRoot =
+  process.env.UPLOAD_ARCHIVE_DIR || path.join(process.cwd(), "uploads");
+const legacyUploadsRoot = path.join(process.cwd(), "uploads");
+
+const extractArchiveId = (url: string) => {
+  try {
+    const match = url.match(/archives\/([^/]+)/i);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+};
+
+const normalizeRoot = (root: string) => {
+  const resolved = path.resolve(root);
+  return resolved.endsWith(path.sep) ? resolved : `${resolved}${path.sep}`;
+};
+
+const isPathInsideRoot = (root: string, target: string) =>
+  path.resolve(target).startsWith(normalizeRoot(root));
+
+const isLocalUploadPath = (value: string) => {
+  if (!value) return false;
+  if (/^https?:\/\//i.test(value)) return false;
+  if (path.isAbsolute(value)) {
+    return (
+      isPathInsideRoot(archiveRoot, value) ||
+      isPathInsideRoot(legacyUploadsRoot, value)
+    );
+  }
+  const normalized = value.replace(/\\/g, "/");
+  return normalized.startsWith("uploads/") || normalized.startsWith("archives/");
+};
+
+const resolveLocalUploadPath = (value: string) => {
+  if (path.isAbsolute(value)) {
+    if (
+      !isPathInsideRoot(archiveRoot, value) &&
+      !isPathInsideRoot(legacyUploadsRoot, value)
+    ) {
+      throw new Error("Invalid local file path.");
+    }
+    return path.resolve(value);
+  }
+
+  const normalized = value.replace(/\\/g, "/");
+  const targetPath = normalized.startsWith("uploads/")
+    ? path.join(process.cwd(), normalized)
+    : path.join(archiveRoot, normalized);
+  const root = normalized.startsWith("uploads/")
+    ? legacyUploadsRoot
+    : archiveRoot;
+  if (!isPathInsideRoot(root, targetPath)) {
+    throw new Error("Invalid local file path.");
+  }
+  return path.resolve(targetPath);
+};
+
+const sanitizeSegment = (value: string) =>
+  value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
 
 export async function GET(
   _request: Request,
@@ -1263,6 +1332,157 @@ export async function POST(
     });
     return NextResponse.json(
       { message: "تعذر حفظ المستند في قاعدة البيانات." },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ clientCode: string }> }
+) {
+  const user = await getAuthUserFromCookies();
+  if (!user) {
+    await recordAuditLog({
+      action: "client.delete",
+      status: "failure",
+      message: "غير مصرح",
+      reason: "unauthorized",
+      request,
+    });
+    return NextResponse.json({ message: "غير مصرح" }, { status: 401 });
+  }
+
+  if (!canDeleteClient(user)) {
+    await recordAuditLog({
+      action: "client.delete",
+      status: "failure",
+      message: "ليس لديك صلاحية حذف العملاء.",
+      reason: "forbidden",
+      user,
+      request,
+    });
+    return NextResponse.json(
+      { message: "ليس لديك صلاحية حذف العملاء." },
+      { status: 403 }
+    );
+  }
+
+  const params = await context.params;
+  const rawCode = (params.clientCode ?? "").trim();
+  if (!rawCode) {
+    await recordAuditLog({
+      action: "client.delete",
+      status: "failure",
+      message: "clientCode مفقود",
+      reason: "missing_client_code",
+      user,
+      request,
+    });
+    return NextResponse.json({ message: "clientCode مفقود" }, { status: 400 });
+  }
+
+  try {
+    await connectMongo();
+    const client = await ClientModel.findOne({
+      $or: [{ clientCode: rawCode }, { clientCodeRaw: rawCode }],
+    }).lean();
+    if (!client) {
+      await recordAuditLog({
+        action: "client.delete",
+        status: "failure",
+        message: "العميل غير موجود.",
+        reason: "not_found",
+        user,
+        request,
+        clientCode: rawCode,
+      });
+      return NextResponse.json(
+        { message: "العميل غير موجود." },
+        { status: 404 }
+      );
+    }
+
+    const clientCode = String((client as any).clientCode ?? rawCode).trim();
+
+    const docs = await ClientDocumentModel.find({ clientCode }).lean();
+    let deletedLocalFiles = 0;
+    let deletedRemoteArchives = 0;
+
+    for (const doc of docs) {
+      const fileUrl = (doc as any).fileUrl || (doc as any).filePath;
+      if (typeof fileUrl !== "string") continue;
+      if (isLocalUploadPath(fileUrl)) {
+        try {
+          const resolvedPath = resolveLocalUploadPath(fileUrl);
+          await fs.unlink(resolvedPath);
+          deletedLocalFiles += 1;
+        } catch {
+          /* ignore */
+        }
+        continue;
+      }
+
+      const archiveId = extractArchiveId(fileUrl);
+      if (!archiveId) continue;
+      try {
+        const res = await fetch(`${archiveBase}/api/archives/${archiveId}`, {
+          method: "DELETE",
+        });
+        if (res.ok) deletedRemoteArchives += 1;
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const safeClientId = sanitizeSegment(clientCode);
+    if (safeClientId) {
+      const clientDir = path.join(archiveRoot, safeClientId);
+      const resolvedDir = path.resolve(clientDir);
+      if (isPathInsideRoot(archiveRoot, resolvedDir)) {
+        await fs.rm(resolvedDir, { recursive: true, force: true });
+      }
+    }
+
+    const deleteDocsRes = await ClientDocumentModel.deleteMany({ clientCode });
+    await ClientDocCounterModel.deleteMany({ clientCode });
+    await UploadFileRecordModel.deleteMany({ clientId: clientCode });
+    await ArchiveModel.deleteMany({ clientCode });
+    await ClientModel.deleteOne({ _id: (client as any)._id });
+
+    await recordAuditLog({
+      action: "client.delete",
+      status: "success",
+      message: "تم حذف العميل وجميع ملفاته.",
+      user,
+      request,
+      clientCode,
+      details: {
+        deletedDocuments: deleteDocsRes.deletedCount ?? docs.length,
+        deletedLocalFiles,
+        deletedRemoteArchives,
+      },
+    });
+
+    return NextResponse.json({
+      ok: true,
+      deletedDocuments: deleteDocsRes.deletedCount ?? docs.length,
+      deletedLocalFiles,
+      deletedRemoteArchives,
+    });
+  } catch (error) {
+    console.error("Delete client failed:", error);
+    await recordAuditLog({
+      action: "client.delete",
+      status: "failure",
+      message: "تعذر حذف العميل.",
+      reason: error instanceof Error ? error.message : "server_error",
+      user,
+      request,
+      clientCode: rawCode,
+    });
+    return NextResponse.json(
+      { message: "تعذر حذف العميل." },
       { status: 500 }
     );
   }

@@ -1536,7 +1536,7 @@ import {
 import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
 import { logClientEvent } from "@/lib/client-log";
 import { checkArchiveHealth, ensureArchiveAvailable } from "@/lib/archive-health";
-import { normalizeBranch as normalizeBranchPerm } from "@/lib/permissions";
+import { canDeleteClient, normalizeBranch as normalizeBranchPerm } from "@/lib/permissions";
 import {
   canAccessAllBranches,
   canCreateClient,
@@ -1700,8 +1700,10 @@ export default function NewClientPage() {
   const [clientNameHint, setClientNameHint] = useState("");
   const [isExisting, setIsExisting] = useState(false);
   const [canEdit, setCanEdit] = useState(true);
+  const [canDelete, setCanDelete] = useState(false);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const [isDeletingClient, setIsDeletingClient] = useState(false);
   const [docs, setDocs] = useState<DocRowState[]>([]);
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -1771,9 +1773,11 @@ const makeEmptyRow = (): DocRowState => ({
         const isAllowed = canCreateClient(userData);
         const branchNorm = normalizeBranchPerm(userData?.branch);
         const adminFlag = canAccessAllBranches(userData);
+        const deleteAllowed = canDeleteClient(userData);
         setUserBranch(branchNorm);
         setIsAdmin(adminFlag);
         setSelectedBranch(branchNorm);
+        setCanDelete(deleteAllowed);
 
         if (adminFlag) {
           try {
@@ -1926,6 +1930,44 @@ const makeEmptyRow = (): DocRowState => ({
       setIsSaving(false);
       setUploadStats(null);
       setLoading(false);
+    }
+  };
+
+  const handleDeleteClient = async () => {
+    const code = clientCode.trim();
+    if (!code || !clientLoaded || !isExisting || isDeletingClient) return;
+    const ok =
+      typeof window !== "undefined" &&
+      window.confirm(
+        "سيتم حذف العميل نهائياً مع جميع المستندات والملفات. هل أنت متأكد؟",
+      );
+    if (!ok) return;
+    setIsDeletingClient(true);
+    setMessage("");
+    try {
+      const res = await fetch(`/api/clients/${encodeURIComponent(code)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ confirm: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.message || "تعذر حذف العميل.");
+      }
+      setMessage("تم حذف العميل وجميع ملفاته بنجاح.");
+      setClientLoaded(false);
+      setIsExisting(false);
+      setClientName("");
+      setDocs([makeEmptyRow()]);
+    } catch (err) {
+      setMessage(
+        err instanceof Error
+          ? err.message
+          : "تعذر حذف العميل أو الاتصال بالخادم.",
+      );
+    } finally {
+      setIsDeletingClient(false);
     }
   };
 
@@ -2615,6 +2657,18 @@ const makeEmptyRow = (): DocRowState => ({
               تحميل بيانات العميل
             </button>
           </div>
+          {canDelete && clientLoaded && isExisting ? (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleDeleteClient}
+                disabled={loading || isSaving || isDeletingClient}
+                className="rounded-lg border border-rose-300 bg-rose-600 px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-900 disabled:opacity-60"
+              >
+                {isDeletingClient ? "جاري الحذف..." : "حذف العميل بالكامل"}
+              </button>
+            </div>
+          ) : null}
 
           <div className="space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -2892,7 +2946,8 @@ const makeEmptyRow = (): DocRowState => ({
         .archive-scene {
           position: relative;
           height: 170px;
-          background: radial-gradient(
+          background:
+            radial-gradient(
               circle at 70% 10%,
               rgba(148, 163, 184, 0.18),
               transparent 55%
@@ -3018,7 +3073,8 @@ const makeEmptyRow = (): DocRowState => ({
         }
         @keyframes doc-archive {
           0% {
-            transform: translateX(-20px) translateY(-4px) rotate(-2deg) scale(0.9);
+            transform: translateX(-20px) translateY(-4px) rotate(-2deg)
+              scale(0.9);
             opacity: 0;
           }
           20% {
@@ -3029,11 +3085,13 @@ const makeEmptyRow = (): DocRowState => ({
             opacity: 1;
           }
           68% {
-            transform: translateX(172px) translateY(20px) rotate(1deg) scale(0.9);
+            transform: translateX(172px) translateY(20px) rotate(1deg)
+              scale(0.9);
             opacity: 0.9;
           }
           100% {
-            transform: translateX(184px) translateY(36px) rotate(2deg) scale(0.8);
+            transform: translateX(184px) translateY(36px) rotate(2deg)
+              scale(0.8);
             opacity: 0;
           }
         }
