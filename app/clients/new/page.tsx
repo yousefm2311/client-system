@@ -1535,7 +1535,7 @@ import {
 } from "@/lib/documents";
 import { getArchiveUploadErrorMessage, uploadArchiveWithRetry } from "@/lib/archive-upload";
 import { logClientEvent } from "@/lib/client-log";
-import { ensureArchiveAvailable } from "@/lib/archive-health";
+import { checkArchiveHealth, ensureArchiveAvailable } from "@/lib/archive-health";
 import { normalizeBranch as normalizeBranchPerm } from "@/lib/permissions";
 import {
   canAccessAllBranches,
@@ -1577,6 +1577,13 @@ type SaveProgress = {
   done: number;
   success: number;
   failed: number;
+};
+
+type UploadStats = {
+  totalBytes: number;
+  completedBytes: number;
+  startedAt: number;
+  speedBps: number;
 };
 
 type PreparedRow = {
@@ -1623,6 +1630,41 @@ const isPdfFile = (file: File) => {
 
 const isFileSizeOk = (file: File) => file.size <= MAX_FILE_SIZE_BYTES;
 const fileSizeError = `حجم الملف أكبر من الحد المسموح (${MAX_FILE_SIZE_LABEL}).`;
+const formatBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  const fixed = size >= 100 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(fixed)} ${units[index]}`;
+};
+const formatSpeed = (bps: number) => {
+  if (!Number.isFinite(bps) || bps <= 0) return "0 KB/s";
+  return `${formatBytes(bps)}/s`;
+};
+const DEFAULT_API_TIMEOUT_MS = Number(
+  process.env.NEXT_PUBLIC_API_TIMEOUT_MS ?? 20000,
+);
+const fetchWithTimeout = async (
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs: number = DEFAULT_API_TIMEOUT_MS,
+) => {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetch(input, init);
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
 
 const runWithConcurrency = async <T,>(
   tasks: Array<() => Promise<T>>,
@@ -1662,6 +1704,12 @@ export default function NewClientPage() {
   const [loading, setLoading] = useState(false);
   const [docs, setDocs] = useState<DocRowState[]>([]);
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [uploadStats, setUploadStats] = useState<UploadStats | null>(null);
+  const [uploadNotice, setUploadNotice] = useState("");
+  const [isOnline, setIsOnline] = useState(true);
+  const [mounted, setMounted] = useState(false);
+  const [dialogDismissed, setDialogDismissed] = useState(false);
 
   const today = () => new Date().toISOString().slice(0, 10);
 const makeEmptyRow = (): DocRowState => ({
@@ -1682,11 +1730,28 @@ const makeEmptyRow = (): DocRowState => ({
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    setMounted(true);
+    const handleStatus = () => setIsOnline(navigator.onLine);
+    handleStatus();
+    window.addEventListener("online", handleStatus);
+    window.addEventListener("offline", handleStatus);
+    return () => {
+      window.removeEventListener("online", handleStatus);
+      window.removeEventListener("offline", handleStatus);
+    };
+  }, []);
+
+  useEffect(() => {
     setClientLoaded(false);
     setClientName("");
     setClientNameHint("");
     setIsExisting(false);
     setSaveProgress(null);
+    setIsSaving(false);
+    setUploadStats(null);
+    setUploadNotice("");
+    setDialogDismissed(false);
   }, [clientCode]);
 
   // صلاحيات الصفحة + تحميل الفروع للإدمن
@@ -1765,6 +1830,9 @@ const makeEmptyRow = (): DocRowState => ({
   const loadClient = async () => {
     if (!clientCode.trim()) return;
     setLoading(true);
+    setIsSaving(false);
+    setUploadStats(null);
+    setUploadNotice("");
     setMessage("");
     setClientNameHint("");
     setCanEdit(true);
@@ -1855,6 +1923,8 @@ const makeEmptyRow = (): DocRowState => ({
           : "تعذر الاتصال بالخادم أو قاعدة البيانات، حاول لاحقاً.",
       );
     } finally {
+      setIsSaving(false);
+      setUploadStats(null);
       setLoading(false);
     }
   };
@@ -1980,6 +2050,42 @@ const makeEmptyRow = (): DocRowState => ({
       return;
     }
 
+    const uploadRows = rowsToSave.filter((item) => Boolean(item.row.file));
+    const totalBytes = uploadRows.reduce(
+      (sum, item) => sum + (item.row.file?.size ?? 0),
+      0,
+    );
+    const hasUploads = uploadRows.length > 0;
+    if (hasUploads) {
+      try {
+        const health = await checkArchiveHealth({ force: true });
+        if (!health.ok) {
+          setUploadNotice(ARCHIVE_UNAVAILABLE_MESSAGE);
+          setMessage(ARCHIVE_UNAVAILABLE_MESSAGE);
+          setIsSaving(false);
+          return;
+        }
+      } catch {
+        setUploadNotice("تعذر الاتصال بالخادم أو الإنترنت غير مستقر.");
+        setMessage("تعذر الاتصال بالخادم أو الإنترنت غير مستقر.");
+        setIsSaving(false);
+        return;
+      }
+    }
+    setIsSaving(hasUploads);
+    setDialogDismissed(false);
+    setUploadNotice("");
+    setUploadStats(
+      hasUploads
+        ? {
+            totalBytes,
+            completedBytes: 0,
+            startedAt: Date.now(),
+            speedBps: 0,
+          }
+        : null,
+    );
+
     setLoading(true);
     setMessage("");
     setSaveProgress({
@@ -1990,7 +2096,7 @@ const makeEmptyRow = (): DocRowState => ({
     });
     try {
       if (!isExisting) {
-        const createRes = await fetch("/api/clients", {
+        const createRes = await fetchWithTimeout("/api/clients", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -2019,6 +2125,19 @@ const makeEmptyRow = (): DocRowState => ({
             success: prev.success + (ok ? 1 : 0),
             failed: prev.failed + (ok ? 0 : 1),
           };
+        });
+      };
+      const recordUploadedBytes = (bytes: number) => {
+        if (!bytes) return;
+        setUploadStats((prev) => {
+          if (!prev) return prev;
+          const completedBytes = Math.min(
+            prev.completedBytes + bytes,
+            prev.totalBytes || prev.completedBytes + bytes,
+          );
+          const elapsedSeconds = (Date.now() - prev.startedAt) / 1000;
+          const speedBps = elapsedSeconds > 0 ? completedBytes / elapsedSeconds : 0;
+          return { ...prev, completedBytes, speedBps };
         });
       };
 
@@ -2076,19 +2195,22 @@ const makeEmptyRow = (): DocRowState => ({
             error: "",
             retryCount: undefined,
           });
-          const saveRes = await fetch(`/api/clients/${trimmedClientCode}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({
-              docId: row.docId,
-              clientName: trimmedClientName || clientName,
-              docName,
-              docDate: docDateValue,
-              fileUrl,
-              replaceExisting: true,
-            }),
-          });
+          const saveRes = await fetchWithTimeout(
+            `/api/clients/${trimmedClientCode}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({
+                docId: row.docId,
+                clientName: trimmedClientName || clientName,
+                docName,
+                docDate: docDateValue,
+                fileUrl,
+                replaceExisting: true,
+              }),
+            },
+          );
           const saveData = await saveRes.json().catch(() => ({}));
           if (!saveRes.ok)
             throw new Error(saveData.message || "تعذر حفظ المستند.");
@@ -2121,6 +2243,23 @@ const makeEmptyRow = (): DocRowState => ({
           const errorMessage = getArchiveUploadErrorMessage(err, {
             fileTooLarge: fileSizeError,
           });
+          const isNetworkFailure =
+            err instanceof TypeError ||
+            (err instanceof Error && err.name === "AbortError") ||
+            errorMessage.includes("الإنترنت") ||
+            errorMessage.includes("الاتصال") ||
+            errorMessage.includes("مهلة") ||
+            errorMessage.startsWith(ARCHIVE_UNAVAILABLE_MESSAGE);
+          if (isNetworkFailure) {
+            const notice = errorMessage.startsWith(ARCHIVE_UNAVAILABLE_MESSAGE)
+              ? ARCHIVE_UNAVAILABLE_MESSAGE
+              : err instanceof TypeError ||
+                  (err instanceof Error && err.name === "AbortError")
+                ? "تعذر الاتصال بالخادم أو الإنترنت غير مستقر."
+                : "الإنترنت فيه مشكلة أو الاتصال اتقطع أثناء الرفع.";
+            setUploadNotice(notice);
+            setIsSaving(false);
+          }
           void logClientEvent({
             action: row.docId ? "document.update" : "document.save",
             status: "failure",
@@ -2161,6 +2300,7 @@ const makeEmptyRow = (): DocRowState => ({
         for (const item of group) {
           const result = await processRow(item);
           updateProgress(result.ok);
+          recordUploadedBytes(item.row.file?.size ?? 0);
           groupResults.push(result);
         }
         return groupResults;
@@ -2197,9 +2337,18 @@ const makeEmptyRow = (): DocRowState => ({
       const resolvedMessage =
         err instanceof TypeError
           ? "تعذر الاتصال بالخادم، حاول لاحقًا."
+          : err instanceof Error && err.name === "AbortError"
+            ? "انتهت مهلة الاتصال بالخادم، حاول لاحقًا."
           : err instanceof Error
             ? err.message
             : fallbackMessage;
+      if (err instanceof TypeError) {
+        setUploadNotice("تعذر الاتصال بالخادم أو الإنترنت غير مستقر.");
+      } else if (err instanceof Error && err.name === "AbortError") {
+        setUploadNotice("انتهت مهلة الاتصال بالخادم، حاول لاحقًا.");
+      } else if (resolvedMessage.includes("الاتصال")) {
+        setUploadNotice("الإنترنت فيه مشكلة أو الاتصال اتقطع أثناء الرفع.");
+      }
       setMessage(resolvedMessage);
       void logClientEvent({
         action: "document.save",
@@ -2209,6 +2358,9 @@ const makeEmptyRow = (): DocRowState => ({
         clientCode: trimmedClientCode,
       });
     } finally {
+      setIsSaving(false);
+      setUploadStats(null);
+      setDialogDismissed(false);
       setLoading(false);
     }
   };
@@ -2244,6 +2396,30 @@ const makeEmptyRow = (): DocRowState => ({
     saveProgress && saveProgress.total > 0
       ? Math.round((saveProgress.done / saveProgress.total) * 100)
       : 0;
+  const bytesPercent =
+    uploadStats && uploadStats.totalBytes > 0
+      ? Math.min(
+          100,
+          Math.round((uploadStats.completedBytes / uploadStats.totalBytes) * 100),
+        )
+      : progressPercent;
+  const speedLabel = uploadStats
+    ? uploadStats.completedBytes > 0
+      ? formatSpeed(uploadStats.speedBps)
+      : "جاري القياس..."
+    : "";
+  const bytesLabel =
+    uploadStats && uploadStats.totalBytes > 0
+      ? `${formatBytes(uploadStats.completedBytes)} / ${formatBytes(
+          uploadStats.totalBytes,
+        )}`
+      : "";
+  const showUploadDialog = Boolean(
+    mounted && isSaving && saveProgress && !dialogDismissed,
+  );
+  const showUploadReopen = Boolean(
+    mounted && isSaving && saveProgress && dialogDismissed,
+  );
 
   if (allowed === false) {
     return (
@@ -2257,6 +2433,100 @@ const makeEmptyRow = (): DocRowState => ({
 
   return (
     <main className="min-h-screen bg-[var(--background)] px-4 py-8">
+      {showUploadDialog ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative w-[92%] max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-right">
+                <p className="text-xs text-slate-500">جاري رفع الملفات</p>
+                <p className="text-lg font-semibold text-slate-900">
+                  من فضلك انتظر...
+                </p>
+              </div>
+              <div className="h-10 w-10 rounded-full border-2 border-slate-200 border-t-sky-500 animate-spin" />
+            </div>
+            <div className="mt-4 space-y-2">
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                <div
+                  className="h-full bg-sky-500 transition-all"
+                  style={{ width: `${bytesPercent}%` }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <span>تحميل {bytesPercent}%</span>
+                <span>
+                  {bytesLabel ||
+                    `${saveProgress?.done ?? 0}/${saveProgress?.total ?? 0}`}
+                </span>
+              </div>
+              <div className="text-xs text-slate-500">
+                سرعة الرفع:{" "}
+                <span className="font-semibold text-slate-700">
+                  {speedLabel || "..."}
+                </span>
+              </div>
+              {!isOnline ? (
+                <div className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  الإنترنت فيه مشكلة أو الاتصال اتقطع أثناء الرفع.
+                </div>
+              ) : uploadNotice ? (
+                <div className="rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {uploadNotice}
+                </div>
+              ) : null}
+            </div>
+            <div className="mt-4 archive-scene">
+              <div className="cabinet">
+                <div className="cabinet-top" />
+                <div className="cabinet-shell" />
+                <div className="cabinet-divider" />
+                <div className="cabinet-drawer">
+                  <div className="drawer-tray" />
+                  <div className="drawer-front">
+                    <div className="drawer-label" />
+                    <div className="drawer-handle" />
+                  </div>
+                </div>
+              </div>
+              <div className="doc doc-one">
+                <span className="doc-line" />
+                <span className="doc-line short" />
+              </div>
+              <div className="doc doc-two">
+                <span className="doc-line" />
+                <span className="doc-line short" />
+              </div>
+              <div className="doc doc-three">
+                <span className="doc-line" />
+                <span className="doc-line short" />
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setDialogDismissed(true)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-0"
+              >
+                <span className="text-sm leading-none">x</span>
+                إخفاء
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showUploadReopen ? (
+        <button
+          type="button"
+          onClick={() => setDialogDismissed(false)}
+          className="fixed bottom-6 right-6 z-40 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-lg hover:bg-slate-50"
+        >
+          عرض حالة الرفع
+        </button>
+      ) : null}
       <div className="mx-auto max-w-6xl space-y-6">
         <div className="text-right">
           <p className="text-sm text-[var(--text-muted)]">
@@ -2618,6 +2888,171 @@ const makeEmptyRow = (): DocRowState => ({
           ) : null}
         </div>
       </div>
+      <style jsx>{`
+        .archive-scene {
+          position: relative;
+          height: 170px;
+          background: radial-gradient(
+              circle at 70% 10%,
+              rgba(148, 163, 184, 0.18),
+              transparent 55%
+            ),
+            radial-gradient(
+              circle at 20% 90%,
+              rgba(59, 130, 246, 0.08),
+              transparent 60%
+            );
+          border-radius: 18px;
+        }
+        .cabinet {
+          position: absolute;
+          left: 50%;
+          bottom: 12px;
+          width: 220px;
+          height: 130px;
+          transform: translateX(-50%);
+        }
+        .cabinet-shell {
+          position: absolute;
+          inset: 8px 0 0;
+          border-radius: 20px;
+          background: linear-gradient(180deg, #f1f5f9 0%, #d7dde6 100%);
+          border: 1px solid #d0d7e2;
+          box-shadow: 0 18px 32px rgba(15, 23, 42, 0.18);
+        }
+        .cabinet-top {
+          position: absolute;
+          top: 0;
+          left: 12px;
+          width: 196px;
+          height: 12px;
+          border-radius: 999px;
+          background: #cbd5e1;
+          box-shadow: inset 0 -2px 0 #b6c2d1;
+        }
+        .cabinet-divider {
+          position: absolute;
+          left: 14px;
+          right: 14px;
+          top: 48px;
+          height: 2px;
+          background: rgba(148, 163, 184, 0.5);
+        }
+        .cabinet-drawer {
+          position: absolute;
+          left: 16px;
+          bottom: 18px;
+          width: 188px;
+          height: 56px;
+          transform-origin: center bottom;
+          animation: drawer-move 3s ease-in-out infinite;
+        }
+        .drawer-front {
+          position: absolute;
+          inset: 0;
+          border-radius: 14px;
+          background: linear-gradient(180deg, #e2e8f0 0%, #cbd5e1 100%);
+          border: 1px solid #c5ceda;
+          box-shadow: inset 0 -4px 0 #b6c2d1;
+        }
+        .drawer-tray {
+          position: absolute;
+          top: 6px;
+          left: 10px;
+          right: 10px;
+          height: 16px;
+          border-radius: 8px;
+          background: rgba(148, 163, 184, 0.35);
+          box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.6);
+        }
+        .drawer-handle {
+          position: absolute;
+          left: 50%;
+          bottom: 10px;
+          width: 46px;
+          height: 10px;
+          border-radius: 999px;
+          transform: translateX(-50%);
+          background: #94a3b8;
+        }
+        .drawer-label {
+          position: absolute;
+          left: 20px;
+          top: 12px;
+          width: 52px;
+          height: 10px;
+          border-radius: 6px;
+          background: #e2e8f0;
+          box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.5);
+        }
+        .doc {
+          position: absolute;
+          top: 32px;
+          left: calc(50% - 210px);
+          width: 70px;
+          height: 48px;
+          padding: 8px 10px;
+          border-radius: 12px;
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          box-shadow: 0 10px 20px rgba(15, 23, 42, 0.12);
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          animation: doc-archive 3s ease-in-out infinite;
+        }
+        .doc-two {
+          animation-delay: 1s;
+        }
+        .doc-three {
+          animation-delay: 2s;
+        }
+        .doc-line {
+          display: block;
+          height: 4px;
+          border-radius: 999px;
+          background: #94a3b8;
+        }
+        .doc-line.short {
+          width: 60%;
+        }
+        @keyframes doc-archive {
+          0% {
+            transform: translateX(-20px) translateY(-4px) rotate(-2deg) scale(0.9);
+            opacity: 0;
+          }
+          20% {
+            opacity: 1;
+          }
+          50% {
+            transform: translateX(160px) translateY(0) rotate(0deg) scale(1);
+            opacity: 1;
+          }
+          68% {
+            transform: translateX(172px) translateY(20px) rotate(1deg) scale(0.9);
+            opacity: 0.9;
+          }
+          100% {
+            transform: translateX(184px) translateY(36px) rotate(2deg) scale(0.8);
+            opacity: 0;
+          }
+        }
+        @keyframes drawer-move {
+          0%,
+          40% {
+            transform: translateY(0) scale(1);
+          }
+          60% {
+            transform: translateY(6px) scale(1.02);
+          }
+          80% {
+            transform: translateY(0) scale(1);
+          }
+          100% {
+            transform: translateY(0) scale(1);
+          }
+        }
+      `}</style>
     </main>
   );
 }
