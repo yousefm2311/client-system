@@ -154,13 +154,16 @@ export default function OwnerLogsClient() {
         <div
           className="rounded-2xl p-6 shadow-lg border"
           style={{
-            background: "linear-gradient(120deg, var(--header-from), var(--header-to))",
+            background:
+              "linear-gradient(120deg, var(--header-from), var(--header-to))",
             color: "var(--header-text)",
             borderColor: "var(--header-border)",
           }}
         >
           <div className="text-right space-y-2">
-            <p className="text-sm opacity-90">لوحة مراقبة السجلات الكاملة للنظام.</p>
+            <p className="text-sm opacity-90">
+              لوحة مراقبة السجلات الكاملة للنظام.
+            </p>
             <h1 className="text-3xl font-bold tracking-tight">سجل العمليات</h1>
             <p className="text-sm opacity-90">
               استعرض كل العمليات الناجحة والفاشلة مع سبب الخطأ ومصدر الطلب.
@@ -168,13 +171,20 @@ export default function OwnerLogsClient() {
           </div>
         </div>
 
-        <div className="rounded-2xl border bg-white p-5 shadow-sm">
+        <div
+          className="rounded-2xl border bg-white p-5 shadow-sm"
+          style={{
+            borderColor: "var(--header-border)",
+          }}
+        >
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="space-y-1">
               <label className="text-xs text-slate-500">بحث عام</label>
               <input
                 value={filters.query}
-                onChange={(e) => setFilters({ ...filters, query: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, query: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
                 placeholder="نص الرسالة أو المسار أو اسم الموظف"
               />
@@ -183,7 +193,9 @@ export default function OwnerLogsClient() {
               <label className="text-xs text-slate-500">الحالة</label>
               <select
                 value={filters.status}
-                onChange={(e) => setFilters({ ...filters, status: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, status: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
               >
                 <option value="">الكل</option>
@@ -195,7 +207,9 @@ export default function OwnerLogsClient() {
               <label className="text-xs text-slate-500">الإجراء</label>
               <input
                 value={filters.action}
-                onChange={(e) => setFilters({ ...filters, action: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, action: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
                 placeholder="مثال: document.save"
               />
@@ -204,7 +218,9 @@ export default function OwnerLogsClient() {
               <label className="text-xs text-slate-500">رقم الموظف</label>
               <input
                 value={filters.empId}
-                onChange={(e) => setFilters({ ...filters, empId: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, empId: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
                 placeholder="مثال: 3425"
               />
@@ -213,7 +229,9 @@ export default function OwnerLogsClient() {
               <label className="text-xs text-slate-500">كود العميل</label>
               <input
                 value={filters.clientCode}
-                onChange={(e) => setFilters({ ...filters, clientCode: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, clientCode: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
                 placeholder="مثال: 10012"
               />
@@ -222,7 +240,9 @@ export default function OwnerLogsClient() {
               <label className="text-xs text-slate-500">رقم المستند</label>
               <input
                 value={filters.docId}
-                onChange={(e) => setFilters({ ...filters, docId: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, docId: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
                 placeholder="DocId"
               />
@@ -232,7 +252,9 @@ export default function OwnerLogsClient() {
               <input
                 type="date"
                 value={filters.dateFrom}
-                onChange={(e) => setFilters({ ...filters, dateFrom: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, dateFrom: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
               />
             </div>
@@ -241,7 +263,9 @@ export default function OwnerLogsClient() {
               <input
                 type="date"
                 value={filters.dateTo}
-                onChange={(e) => setFilters({ ...filters, dateTo: e.target.value })}
+                onChange={(e) =>
+                  setFilters({ ...filters, dateTo: e.target.value })
+                }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-right text-sm"
               />
             </div>
@@ -279,12 +303,19 @@ export default function OwnerLogsClient() {
           </div>
         </div>
 
-        <div className="rounded-2xl border bg-white shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
+        <div
+          className="rounded-2xl border bg-white shadow-sm overflow-hidden"
+          style={{
+            borderColor: "var(--header-border)",
+          }}
+        >
+          <div className="flex items-center justify-between border-b border-slate-700 px-5 py-3">
             <div className="text-right">
               <p className="text-sm font-semibold text-slate-700">السجلات</p>
               <p className="text-xs text-slate-500">
-                {data ? `الإجمالي ${data.total} سجل` : "ابدأ بالضغط على تحديث السجلات"}
+                {data
+                  ? `الإجمالي ${data.total} سجل`
+                  : "ابدأ بالضغط على تحديث السجلات"}
               </p>
             </div>
             {loading ? (
@@ -297,7 +328,7 @@ export default function OwnerLogsClient() {
           ) : null}
 
           <div className="overflow-auto">
-            <table className="min-w-full text-sm text-right">
+            <table className="min-w-full  text-xs text-right">
               <thead className="bg-slate-50 text-xs uppercase text-slate-500">
                 <tr>
                   <th className="px-4 py-3">الوقت</th>
@@ -315,7 +346,7 @@ export default function OwnerLogsClient() {
               <tbody>
                 {data?.logs?.length ? (
                   data.logs.map((row) => (
-                    <tr key={row.id} className="border-t border-slate-100">
+                    <tr key={row.id} className="border-t border-slate-700">
                       <td className="px-4 py-3 text-xs text-slate-500">
                         {formatDateTime(row.createdAt)}
                       </td>
@@ -360,14 +391,20 @@ export default function OwnerLogsClient() {
                       <td className="px-4 py-3 text-xs text-slate-500">
                         {row.meta?.path || "-"}
                       </td>
-                      <td className="px-4 py-3 text-xs text-slate-500" title={formatDetails(row.details)}>
+                      <td
+                        className="px-4 py-3 text-xs text-slate-500"
+                        title={formatDetails(row.details)}
+                      >
                         {formatDetails(row.details)}
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={10} className="px-4 py-6 text-center text-slate-400">
+                    <td
+                      colSpan={10}
+                      className="px-4 py-6 text-center text-slate-400"
+                    >
                       لا توجد سجلات بعد.
                     </td>
                   </tr>
