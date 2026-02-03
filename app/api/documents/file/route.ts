@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import JSZip from "jszip";
-import path from "path";
-import fs from "fs/promises";
 import { getAuthUserFromCookies } from "@/lib/auth";
 import { connectMongo } from "@/lib/mongo";
 import { ClientDocumentModel } from "@/models/ClientDocument";
@@ -17,9 +15,6 @@ const archiveBase =
   process.env.ARCHIVE_SERVICE_URL ||
   process.env.NEXT_PUBLIC_ARCHIVE_SERVICE_URL ||
   "http://localhost:5000";
-const archiveRoot =
-  process.env.UPLOAD_ARCHIVE_DIR || path.join(process.cwd(), "uploads");
-const legacyUploadsRoot = path.join(process.cwd(), "uploads");
 
 const normalizeArchiveUrl = (rawUrl: string) => {
   const trimmed = rawUrl.trim();
@@ -47,51 +42,6 @@ const normalizeArchiveUrl = (rawUrl: string) => {
   }
 
   return trimmed;
-};
-
-const normalizeRoot = (root: string) => {
-  const resolved = path.resolve(root);
-  return resolved.endsWith(path.sep) ? resolved : `${resolved}${path.sep}`;
-};
-
-const isPathInsideRoot = (root: string, target: string) =>
-  path.resolve(target).startsWith(normalizeRoot(root));
-
-const isLocalUploadPath = (value: string) => {
-  if (!value) return false;
-  if (/^https?:\/\//i.test(value)) return false;
-  if (path.isAbsolute(value)) {
-    return (
-      isPathInsideRoot(archiveRoot, value) ||
-      isPathInsideRoot(legacyUploadsRoot, value)
-    );
-  }
-  const normalized = value.replace(/\\/g, "/");
-  return normalized.startsWith("uploads/") || normalized.startsWith("archives/");
-};
-
-const resolveLocalUploadPath = (value: string) => {
-  if (path.isAbsolute(value)) {
-    if (
-      !isPathInsideRoot(archiveRoot, value) &&
-      !isPathInsideRoot(legacyUploadsRoot, value)
-    ) {
-      throw new Error("Invalid local file path.");
-    }
-    return path.resolve(value);
-  }
-
-  const normalized = value.replace(/\\/g, "/");
-  const targetPath = normalized.startsWith("uploads/")
-    ? path.join(process.cwd(), normalized)
-    : path.join(archiveRoot, normalized);
-  const root = normalized.startsWith("uploads/")
-    ? legacyUploadsRoot
-    : archiveRoot;
-  if (!isPathInsideRoot(root, targetPath)) {
-    throw new Error("Invalid local file path.");
-  }
-  return path.resolve(targetPath);
 };
 
 const guessContentType = (ext: string) => {
@@ -195,42 +145,6 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    if (isLocalUploadPath(storedUrl)) {
-      const resolvedPath = resolveLocalUploadPath(storedUrl);
-      const fileBuffer = await fs.readFile(resolvedPath);
-      const ext = path.extname(resolvedPath) || ".pdf";
-      const safeName = buildDocumentFileName(
-        correctDocName((doc as any).docName || "document"),
-        (doc as any).clientCode || "",
-        `file${ext}`
-      );
-      const asciiName = safeName.replace(/[^\x20-\x7E]/g, "_") || `file${ext}`;
-      const disposition = forceDownload ? "attachment" : "inline";
-      const contentDisposition = `${disposition}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(
-        safeName
-      )}`;
-
-      await recordAuditLog({
-        action: "document.view",
-        status: "success",
-        message: "Local file served.",
-        user,
-        request,
-        docId,
-        clientCode: (doc as any).clientCode,
-        details: { forceDownload, local: true },
-      });
-
-      return new NextResponse(fileBuffer, {
-        status: 200,
-        headers: {
-          "Content-Type": guessContentType(ext),
-          "Content-Disposition": contentDisposition,
-          "Content-Length": fileBuffer.byteLength.toString(),
-        },
-      });
-    }
-
     const fileUrl = normalizeArchiveUrl(storedUrl);
     if (!fileUrl || !/^https?:\/\//i.test(fileUrl)) {
       await recordAuditLog({

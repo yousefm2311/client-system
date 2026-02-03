@@ -50,7 +50,7 @@ const buildError = (message: string, details: Partial<ArchiveUploadError>) =>
   Object.assign(new Error(message), details) as ArchiveUploadError;
 
 const DEFAULT_TIMEOUT_MS = Number(
-  process.env.NEXT_PUBLIC_ARCHIVE_UPLOAD_TIMEOUT_MS ?? 30000
+  process.env.NEXT_PUBLIC_ARCHIVE_UPLOAD_TIMEOUT_MS ?? 120000
 );
 
 export async function uploadArchiveWithRetry({

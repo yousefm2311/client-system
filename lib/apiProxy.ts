@@ -7,7 +7,7 @@ const BASE_URL =
 
 export const archiveClient = axios.create({
   baseURL: BASE_URL,
-  timeout: Number(process.env.ARCHIVE_TIMEOUT_MS ?? 30000),
+  timeout: Number(process.env.ARCHIVE_TIMEOUT_MS ?? 120000),
 });
 
 export type ArchiveUploadResponse = {

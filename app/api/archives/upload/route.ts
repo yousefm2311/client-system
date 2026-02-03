@@ -18,7 +18,7 @@ const PROXY_RETRY_MAX_DELAY_MS = Number(
   process.env.ARCHIVE_PROXY_RETRY_MAX_DELAY_MS || 3000
 );
 const PROXY_TIMEOUT_MS = Number(
-  process.env.ARCHIVE_PROXY_TIMEOUT_MS || 30000
+  process.env.ARCHIVE_PROXY_TIMEOUT_MS || 120000
 );
 const MAX_FILE_SIZE_MB = Number(process.env.NEXT_PUBLIC_MAX_FILE_SIZE_MB ?? 50);
 const MAX_FILE_SIZE_BYTES = Number.isFinite(MAX_FILE_SIZE_MB)

@@ -7,8 +7,6 @@ const SUPER_EMP_IDS: string[] = (process.env.SUPER_EMP_IDS ?? "403,3425")
   .map((s) => s.trim())
   .filter(Boolean);
 
-const DELETE_CLIENT_ALLOWED_EMP_IDS = new Set(["403", "3425"]);
-
 export const normalizeBranch = (branch: unknown): string =>
   String(branch ?? "").trim();
 
@@ -22,12 +20,6 @@ export const canAccessAll = (user: AuthUser | null | undefined): boolean => {
     (SUPER_BRANCH && branch === SUPER_BRANCH) ||
     SUPER_EMP_IDS.includes(empId)
   );
-};
-
-export const canDeleteClient = (user: AuthUser | null | undefined): boolean => {
-  if (!user) return false;
-  const empId = String(user.empId ?? "").trim();
-  return DELETE_CLIENT_ALLOWED_EMP_IDS.has(empId);
 };
 
 export const getUserBranch = (
