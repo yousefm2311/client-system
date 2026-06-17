@@ -1,34 +1,34 @@
 # Client System
 
-A Next.js client management system prepared for building dashboard-style workflows, customer records, and admin-facing web screens.
+A Next.js client/archive management system for dashboard workflows, customer records, document handling, and data integrations.
 
 ## Status
 
-Public portfolio candidate.
+Public pinned candidate.
 
-## Features
+## Key Features
 
-- Next.js application structure
-- Dashboard/client-management workflow foundation
-- Responsive web UI setup
-- Ready for API and authentication integration documentation
+- Next.js App Router project structure
+- Client/dashboard management workflow foundation
+- Form validation with React Hook Form and Zod
+- MongoDB and Mongoose integration support
+- MSSQL integration support for external data sources
+- JWT/Jose authentication package foundation
+- ZIP/document workflow support with JSZip
+- Tailwind CSS styling setup
 
 ## Tech Stack
 
-- Next.js
+- Next.js 16
+- React 19
 - TypeScript
-- React
-- Frontend
-
-## Project Structure
-
-```text
-.
-|-- app/                # Application routes
-|-- components/         # Reusable UI components
-|-- public/             # Static assets
-|-- README.md           # Project documentation
-```
+- Tailwind CSS
+- MongoDB / Mongoose
+- MSSQL
+- React Hook Form
+- Zod
+- JWT / Jose
+- Axios
 
 ## Getting Started
 
@@ -43,19 +43,30 @@ Open `http://localhost:3000` in your browser.
 
 ## Environment Variables
 
-Create a local environment file only when the project requires external services.
+Create a local `.env.local` file when connecting to real services.
 
 ```env
-NEXT_PUBLIC_API_URL=
 DATABASE_URL=
-AUTH_SECRET=
+MONGODB_URI=
+MSSQL_CONNECTION_STRING=
+JWT_SECRET=
+NEXT_PUBLIC_API_URL=
 ```
 
-Never commit real secrets or production credentials.
+Never commit real credentials, database URLs, customer data, or production secrets.
+
+## Scripts
+
+```bash
+npm run dev
+npm run build
+npm run start
+npm run lint
+```
 
 ## Screenshots
 
-Add dashboard screenshots before pinning this repository.
+Add dashboard and client workflow screenshots before pinning publicly.
 
 ```md
 ![Client dashboard](docs/screenshots/dashboard.png)
